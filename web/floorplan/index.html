@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RSSI triangulation — floor plan config</title>
+  <style>
+    :root {
+      --bg: #0f1114;
+      --panel: #1a1d23;
+      --border: #2c323c;
+      --text: #e8eaed;
+      --muted: #9aa0a6;
+      --accent: #4c8bf5;
+      --accent-dim: #2a4a8a;
+      --origin: #34a853;
+      --scale: #fbbc04;
+      --point: #ea4335;
+      --font: "IBM Plex Sans", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+
+    header p {
+      margin: 0.35rem 0 0;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      min-height: calc(100vh - 72px);
+    }
+
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+
+    aside {
+      padding: 1rem 1.25rem;
+      border-right: 1px solid var(--border);
+      background: var(--panel);
+      overflow-y: auto;
+    }
+
+    section {
+      margin-bottom: 1.25rem;
+    }
+
+    section h2 {
+      margin: 0 0 0.6rem;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    label {
+      display: block;
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 0.25rem;
+    }
+
+    input[type="file"],
+    input[type="number"],
+    select,
+    input[type="checkbox"] {
+      width: 100%;
+      margin-bottom: 0.5rem;
+      padding: 0.45rem 0.5rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg);
+      color: var(--text);
+      font: inherit;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.5rem;
+    }
+
+    .scale-row {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      flex-wrap: wrap;
+      font-size: 0.85rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .scale-row input[type="number"] {
+      width: 4.5rem;
+      margin: 0;
+    }
+
+    button {
+      width: 100%;
+      padding: 0.5rem 0.75rem;
+      margin-top: 0.35rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg);
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+    }
+
+    button:hover { border-color: var(--accent); }
+    button.primary {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+    }
+    button.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    .mode-hint {
+      font-size: 0.78rem;
+      color: var(--muted);
+      line-height: 1.4;
+      margin: 0.4rem 0 0;
+    }
+
+    .status {
+      padding: 0.5rem 0.6rem;
+      border-radius: 4px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      font-size: 0.82rem;
+      line-height: 1.45;
+    }
+
+    .coords-display {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 1.1rem;
+      margin-top: 0.5rem;
+    }
+
+    .coords-display span { color: var(--accent); }
+
+    ul.points {
+      list-style: none;
+      padding: 0;
+      margin: 0.5rem 0 0;
+      max-height: 160px;
+      overflow-y: auto;
+      font-size: 0.78rem;
+      font-family: ui-monospace, monospace;
+    }
+
+    ul.points li {
+      padding: 0.5rem 0;
+      border-bottom: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 0.25rem 0.5rem;
+      align-items: start;
+    }
+
+    ul.points li .point-label-input,
+    ul.points li .point-bssid-input {
+      width: 100%;
+      margin: 0;
+      padding: 0.3rem 0.4rem;
+      font-size: 0.78rem;
+      grid-column: 1;
+    }
+
+    ul.points li .point-bssid-input {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+    }
+
+    ul.points li .point-coords {
+      grid-column: 1;
+      font-size: 0.72rem;
+      color: var(--muted);
+      padding-left: 0.1rem;
+    }
+
+    ul.points li .btn-remove {
+      grid-column: 2;
+      grid-row: 1 / span 4;
+      width: 1.75rem;
+      height: 1.75rem;
+      margin: 0;
+      padding: 0;
+      font-size: 1.1rem;
+      line-height: 1;
+      align-self: center;
+    }
+
+    ul.points li.selected {
+      background: rgba(76, 139, 245, 0.12);
+      margin: 0 -0.35rem;
+      padding-left: 0.35rem;
+      padding-right: 0.35rem;
+      border-radius: 4px;
+    }
+
+    main {
+      position: relative;
+      overflow: auto;
+      background: #08090a;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 1rem;
+    }
+
+    .canvas-wrap {
+      position: relative;
+      line-height: 0;
+      cursor: crosshair;
+      max-width: 100%;
+    }
+
+    .canvas-wrap.empty {
+      min-height: 280px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 0.9rem;
+      border: 1px dashed var(--border);
+      border-radius: 6px;
+      cursor: default;
+      width: 100%;
+    }
+
+    canvas {
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-top: 0.5rem;
+    }
+
+    .check-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+      font-size: 0.82rem;
+      margin: 0.5rem 0;
+    }
+
+    .check-row input[type="checkbox"] {
+      width: auto;
+      margin: 0.15rem 0 0;
+    }
+
+    #manualRatioPanel {
+      margin-top: 0.5rem;
+      padding-top: 0.5rem;
+      border-top: 1px solid var(--border);
+    }
+
+    .legend i {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      margin-right: 0.25rem;
+      vertical-align: middle;
+    }
+
+    .warn {
+      color: #fbbc04;
+      font-size: 0.78rem;
+      margin-top: 0.35rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Floor plan config</h1>
+    <p>Usage: see <code>README.md</code> in the repository root.</p>
+  </header>
+
+  <div class="layout">
+    <aside>
+      <section>
+        <h2>1. Image</h2>
+        <label for="file">Floor plan image</label>
+        <input type="file" id="file" accept="image/*" />
+      </section>
+
+      <section>
+        <h2>2. Scale</h2>
+        <label for="unit">Output units</label>
+        <select id="unit">
+          <option value="ft">Feet</option>
+          <option value="m" selected>Meters</option>
+        </select>
+        <p class="mode-hint">Choose how to map pixels to real distance.</p>
+        <button type="button" id="btnScaleRatio" class="primary active">Scale ratio (e.g. 1 in = 20 ft)</button>
+        <button type="button" id="btnScaleDistance">Known distance (two points)</button>
+
+        <div id="panelRatio">
+          <div class="scale-row">
+            <input type="number" id="ratioPlan" value="1" min="0.001" step="any" />
+            <select id="ratioPlanUnit">
+              <option value="in">inch</option>
+              <option value="ft">foot</option>
+              <option value="cm">cm</option>
+              <option value="m">meter</option>
+            </select>
+            <span>=</span>
+            <input type="number" id="ratioReal" value="20" min="0.001" step="any" />
+            <select id="ratioRealUnit">
+              <option value="ft" selected>feet</option>
+              <option value="m">meters</option>
+              <option value="in">inches</option>
+              <option value="cm">cm</option>
+            </select>
+          </div>
+
+          <label class="check-row">
+            <input type="checkbox" id="autoDpi" checked />
+            <span>Image is to scale — derive pixels from scan DPI (no clicking)</span>
+          </label>
+
+          <label for="imageDpi">Scan resolution (DPI)</label>
+          <input type="number" id="imageDpi" value="300" min="1" step="1" />
+          <p class="mode-hint" id="dpiSource">Pixels per inch on the plan. Read from file metadata when available.</p>
+
+          <div id="manualRatioPanel" hidden>
+            <button type="button" id="btnMarkRatio">Calibrate on image (2 clicks)</button>
+            <p class="mode-hint">Use if the image was resized or DPI is wrong. Mark <span id="ratioHint">1 inch</span> on the plan.</p>
+          </div>
+        </div>
+
+        <div id="panelDistance" hidden>
+          <label for="knownDistance">Distance between the two points</label>
+          <div class="row">
+            <input type="number" id="knownDistance" value="20" min="0.001" step="any" />
+            <select id="knownDistanceUnit">
+              <option value="ft">feet</option>
+              <option value="m">meters</option>
+            </select>
+          </div>
+          <button type="button" id="btnMarkDistance">Mark two points on the plan</button>
+        </div>
+
+        <div class="status" id="scaleStatus">Scale not set.</div>
+      </section>
+
+      <section>
+        <h2>3. Origin</h2>
+        <button type="button" id="btnOrigin">Set origin (1 click)</button>
+        <p class="mode-hint">All X/Y values are relative to this point. +X is right, +Y is down (image coordinates).</p>
+        <div class="status" id="originStatus">Origin not set.</div>
+      </section>
+
+      <section>
+        <h2>4. Access points</h2>
+        <button type="button" id="btnMeasure" class="primary active">Click to add AP</button>
+        <label for="pointLabel">Name for next AP</label>
+        <input type="text" id="pointLabel" placeholder="e.g. Lobby" />
+        <label for="pointBssid">BSSID for next AP</label>
+        <input type="text" id="pointBssid" placeholder="aa:bb:cc:dd:ee:ff" spellcheck="false" />
+        <div class="coords-display" id="liveCoords">—</div>
+        <ul class="points" id="pointList"></ul>
+        <button type="button" id="btnClearPoints">Clear all APs</button>
+      </section>
+
+      <section>
+        <h2>5. Module config</h2>
+        <label for="scanSsid">scan_ssid</label>
+        <input type="text" id="scanSsid" value="Viam-5G" placeholder="e.g. Viam-5G" />
+        <label for="scanCount">scan_count</label>
+        <input type="number" id="scanCount" value="5" min="1" step="1" />
+        <div class="row">
+          <div>
+            <label for="originXm">floor_plan.x_origin_m</label>
+            <input type="number" id="originXm" value="0" step="any" />
+          </div>
+          <div>
+            <label for="originYm">floor_plan.y_origin_m</label>
+            <input type="number" id="originYm" value="0" step="any" />
+          </div>
+        </div>
+        <button type="button" id="btnExportModule" class="primary">Copy module config JSON</button>
+        <button type="button" id="btnDownloadModule">Download module_config.json</button>
+        <button type="button" id="btnImportModule">Import module config…</button>
+        <input type="file" id="importModuleFile" accept="application/json,.json" hidden />
+        <p class="warn" id="exportWarn" hidden></p>
+        <button type="button" id="btnExportLegacy">Copy legacy floor_plan_points.json</button>
+      </section>
+
+      <div class="legend">
+        <span><i style="background:var(--scale)"></i>Scale line</span>
+        <span><i style="background:var(--origin)"></i>Origin</span>
+        <span><i style="background:var(--point)"></i>Measured</span>
+      </div>
+    </aside>
+
+    <main>
+      <div class="canvas-wrap empty" id="wrap">
+        <span>Upload a floor plan to begin</span>
+        <canvas id="canvas" hidden></canvas>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const METERS_PER = { m: 1, ft: 0.3048, in: 0.0254, cm: 0.01 };
+    const INCHES_PER_PLAN_UNIT = { in: 1, ft: 12, cm: 1 / 2.54, m: 39.3700787 };
+
+    const state = {
+      img: null,
+      mode: "measure",
+      scaleMode: "ratio",
+      scaleAuto: true,
+      pixelsPerMeter: null,
+      scaleLine: null,
+      origin: null,
+      points: [],
+      pendingClicks: [],
+    };
+
+    const $ = (id) => document.getElementById(id);
+    const canvas = $("canvas");
+    const ctx = canvas.getContext("2d");
+    const wrap = $("wrap");
+
+    function toMeters(value, unit) {
+      return value * METERS_PER[unit];
+    }
+
+    function formatRatioHint() {
+      const n = $("ratioPlan").value;
+      const u = $("ratioPlanUnit").selectedOptions[0].text;
+      $("ratioHint").textContent = `${n} ${u}`;
+    }
+
+    function syncManualPanel() {
+      const auto = $("autoDpi").checked && state.scaleMode === "ratio";
+      $("manualRatioPanel").hidden = auto;
+      state.scaleAuto = auto;
+    }
+
+    async function readImageDpi(file) {
+      const buf = await file.slice(0, 128 * 1024).arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      const v = new DataView(buf);
+
+      if (bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50) {
+        let offset = 8;
+        while (offset + 12 < bytes.length) {
+          const length = v.getUint32(offset);
+          const type = String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+          if (type === "pHYs" && length >= 9) {
+            const xppu = v.getUint32(offset + 8);
+            const unit = v.getUint8(offset + 16);
+            if (unit === 1 && xppu > 0) return xppu * 0.0254;
+          }
+          offset += 12 + length + 4;
+        }
+      }
+
+      if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+        let i = 2;
+        while (i + 10 < bytes.length) {
+          if (bytes[i] !== 0xff) break;
+          const marker = bytes[i + 1];
+          if (marker === 0xe0 || marker === 0xe1) {
+            const segLen = v.getUint16(i + 2);
+            const id = String.fromCharCode(bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7]);
+            if (id === "JFIF" && i + 15 < bytes.length) {
+              const units = bytes[i + 13];
+              const xden = v.getUint16(i + 14);
+              const yden = v.getUint16(i + 16);
+              const dens = Math.max(xden, yden);
+              if (dens > 0) {
+                if (units === 1) return dens;
+                if (units === 2) return dens * 2.54;
+              }
+            }
+          }
+          const segLen = v.getUint16(i + 2);
+          if (segLen < 2) break;
+          i += 2 + segLen;
+        }
+      }
+      return null;
+    }
+
+    ["ratioPlan", "ratioPlanUnit", "ratioReal", "ratioRealUnit"].forEach((id) => {
+      $(id).addEventListener("input", () => {
+        formatRatioHint();
+        tryAutoScale();
+      });
+      $(id).addEventListener("change", () => {
+        formatRatioHint();
+        tryAutoScale();
+      });
+    });
+    $("imageDpi").addEventListener("input", tryAutoScale);
+    $("autoDpi").addEventListener("change", () => {
+      syncManualPanel();
+      if (!$("autoDpi").checked && state.scaleAuto) {
+        state.pixelsPerMeter = null;
+        state.scaleLine = null;
+      }
+      tryAutoScale();
+      if (!state.pixelsPerMeter) updateStatus();
+    });
+    formatRatioHint();
+    syncManualPanel();
+
+    function outputUnit() {
+      return $("unit").value;
+    }
+
+    function metersToOutput(m) {
+      return outputUnit() === "ft" ? m / 0.3048 : m;
+    }
+
+    function unitLabel() {
+      return outputUnit() === "ft" ? "ft" : "m";
+    }
+
+    function setMode(mode) {
+      state.mode = mode;
+      state.pendingClicks = [];
+      const map = {
+        measure: $("btnMeasure"),
+        origin: $("btnOrigin"),
+        scaleRatio: $("btnMarkRatio"),
+        scaleDistance: $("btnMarkDistance"),
+      };
+      [ $("btnMeasure"), $("btnOrigin"), $("btnMarkRatio"), $("btnMarkDistance") ].forEach((b) => {
+        b.classList.remove("active");
+      });
+      if (map[mode]) map[mode].classList.add("active");
+
+      if (mode === "scaleRatio" || mode === "scaleDistance") {
+        wrap.style.cursor = "crosshair";
+      } else if (mode === "origin") {
+        wrap.style.cursor = "cell";
+      } else {
+        wrap.style.cursor = state.img ? "crosshair" : "default";
+      }
+    }
+
+    $("btnScaleRatio").addEventListener("click", () => {
+      state.scaleMode = "ratio";
+      $("panelRatio").hidden = false;
+      $("panelDistance").hidden = true;
+      $("btnScaleRatio").classList.add("primary", "active");
+      $("btnScaleDistance").classList.remove("primary", "active");
+      syncManualPanel();
+      tryAutoScale();
+    });
+
+    $("btnScaleDistance").addEventListener("click", () => {
+      state.scaleMode = "distance";
+      state.pixelsPerMeter = null;
+      $("panelRatio").hidden = true;
+      $("panelDistance").hidden = false;
+      $("btnScaleDistance").classList.add("primary", "active");
+      $("btnScaleRatio").classList.remove("primary", "active");
+      updateStatus();
+    });
+
+    $("btnMarkRatio").addEventListener("click", () => setMode("scaleRatio"));
+    $("btnMarkDistance").addEventListener("click", () => setMode("scaleDistance"));
+    $("btnOrigin").addEventListener("click", () => setMode("origin"));
+    $("btnMeasure").addEventListener("click", () => setMode("measure"));
+
+    $("file").addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      $("dpiSource").textContent = "Reading DPI from file…";
+      const detected = await readImageDpi(file);
+      if (detected) {
+        $("imageDpi").value = Math.round(detected);
+        $("dpiSource").textContent = `Using ${Math.round(detected)} DPI from image metadata.`;
+      } else {
+        $("dpiSource").textContent = "No DPI in file — set scan resolution above (e.g. 300 for a typical PDF export).";
+      }
+
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        state.img = img;
+        state.pixelsPerMeter = null;
+        state.scaleLine = null;
+        state.origin = null;
+        state.points = [];
+        $("pointList").innerHTML = "";
+        resizeCanvas();
+        wrap.classList.remove("empty");
+        wrap.querySelector("span")?.remove();
+        canvas.hidden = false;
+        if (tryAutoScale()) {
+          setMode("origin");
+        } else {
+          updateStatus();
+          setMode(state.scaleMode === "distance" ? "scaleDistance" : "scaleRatio");
+        }
+        redraw();
+      };
+      img.src = url;
+    });
+
+    function resizeCanvas() {
+      if (!state.img) return;
+      const maxW = wrap.clientWidth - 8 || 1200;
+      const scale = Math.min(1, maxW / state.img.width);
+      canvas.width = state.img.width * scale;
+      canvas.height = state.img.height * scale;
+    }
+
+    window.addEventListener("resize", () => {
+      if (state.img) {
+        resizeCanvas();
+        redraw();
+      }
+    });
+
+    function canvasPoint(evt) {
+      const rect = canvas.getBoundingClientRect();
+      const sx = state.img.width / rect.width;
+      const sy = state.img.height / rect.height;
+      return {
+        x: (evt.clientX - rect.left) * sx,
+        y: (evt.clientY - rect.top) * sy,
+      };
+    }
+
+    function pixelDistance(a, b) {
+      return Math.hypot(b.x - a.x, b.y - a.y);
+    }
+
+    function updateScaleStatus(auto) {
+      if (!state.pixelsPerMeter) {
+        $("scaleStatus").textContent = "Scale not set.";
+        return;
+      }
+      const perOut = state.pixelsPerMeter / (outputUnit() === "ft" ? 0.3048 : 1);
+      const src = auto
+        ? `auto ${$("imageDpi").value} DPI, ${$("ratioPlan").value} ${$("ratioPlanUnit").value} = ${$("ratioReal").value} ${$("ratioRealUnit").value}`
+        : "manual calibration";
+      $("scaleStatus").textContent =
+        `Scale set (${src}): ${perOut.toFixed(2)} px per ${unitLabel()}`;
+    }
+
+    function defaultPointLabel(index) {
+      return `AP ${index + 1}`;
+    }
+
+    function normalizeMac(mac) {
+      if (!mac || !String(mac).trim()) return "";
+      let cleaned = String(mac).trim().toLowerCase().replace(/-/g, ":");
+      const m = cleaned.match(/^([0-9a-f]{2}(?::[0-9a-f]{2}){5})/);
+      if (m) cleaned = m[1];
+      const parts = cleaned.split(":");
+      if (parts.length !== 6) return "";
+      return parts.map((p) => p.padStart(2, "0")).join(":");
+    }
+
+    function worldMeters(p) {
+      const w = p.world || (p.img ? imageToWorld(p.img) : null);
+      if (!w) return null;
+      if (outputUnit() === "m") return { x: w.x, y: w.y };
+      return { x: w.x * 0.3048, y: w.y * 0.3048 };
+    }
+
+    function buildModuleConfig() {
+      const scanSsid = $("scanSsid").value.trim();
+      if (!scanSsid) throw new Error("scan_ssid is required");
+
+      const access_points = [];
+      const missingBssid = [];
+      state.points.forEach((p, i) => {
+        const wm = worldMeters(p);
+        if (!wm) return;
+        const name = (p.label || defaultPointLabel(i)).trim() || defaultPointLabel(i);
+        const bssid = normalizeMac(p.bssid || "");
+        if (!bssid) missingBssid.push(name);
+        access_points.push({
+          name,
+          x_m: wm.x,
+          y_m: wm.y,
+          bssid,
+        });
+      });
+
+      if (!access_points.length) {
+        throw new Error("Add at least one access point on the plan.");
+      }
+
+      return {
+        config: {
+          scan_ssid: scanSsid,
+          scan_count: Math.max(1, parseInt($("scanCount").value, 10) || 5),
+          floor_plan: {
+            x_origin_m: parseFloat($("originXm").value) || 0,
+            y_origin_m: parseFloat($("originYm").value) || 0,
+          },
+          access_points,
+        },
+        missingBssid,
+      };
+    }
+
+    function showExportWarn(missingBssid) {
+      const el = $("exportWarn");
+      if (!missingBssid.length) {
+        el.hidden = true;
+        el.textContent = "";
+        return;
+      }
+      el.hidden = false;
+      el.textContent =
+        `${missingBssid.length} AP(s) missing BSSID: ${missingBssid.slice(0, 4).join(", ")}` +
+        (missingBssid.length > 4 ? "…" : "") +
+        " — fill in before deploying.";
+    }
+
+    function formatCoords(world) {
+      if (!world) return "—";
+      return `${world.x.toFixed(2)}, ${world.y.toFixed(2)} ${unitLabel()}`;
+    }
+
+    function removePoint(index) {
+      state.points.splice(index, 1);
+      renderPointList();
+      $("liveCoords").textContent = "—";
+      redraw();
+    }
+
+    function renderPointList() {
+      const list = $("pointList");
+      list.innerHTML = "";
+      state.points.forEach((p, i) => {
+        p.world = imageToWorld(p.img);
+        const li = document.createElement("li");
+        li.dataset.index = String(i);
+
+        const labelInput = document.createElement("input");
+        labelInput.type = "text";
+        labelInput.className = "point-label-input";
+        labelInput.value = p.label || defaultPointLabel(i);
+        labelInput.addEventListener("input", () => {
+          p.label = labelInput.value;
+          redraw();
+        });
+        labelInput.addEventListener("focus", () => {
+          list.querySelectorAll("li").forEach((el) => el.classList.remove("selected"));
+          li.classList.add("selected");
+        });
+
+        const bssidInput = document.createElement("input");
+        bssidInput.type = "text";
+        bssidInput.className = "point-bssid-input";
+        bssidInput.placeholder = "bssid (aa:bb:cc:dd:ee:ff)";
+        bssidInput.value = p.bssid || "";
+        bssidInput.spellcheck = false;
+        bssidInput.addEventListener("input", () => {
+          p.bssid = bssidInput.value;
+          showExportWarn(buildModuleConfig().missingBssid);
+        });
+
+        const coords = document.createElement("div");
+        coords.className = "point-coords";
+        coords.textContent = formatCoords(p.world);
+
+        const removeBtn = document.createElement("button");
+        removeBtn.type = "button";
+        removeBtn.className = "btn-remove";
+        removeBtn.title = "Remove this point";
+        removeBtn.textContent = "×";
+        removeBtn.addEventListener("click", () => removePoint(i));
+
+        li.append(labelInput, bssidInput, coords, removeBtn);
+        list.appendChild(li);
+      });
+      try {
+        showExportWarn(buildModuleConfig().missingBssid);
+      } catch {
+        showExportWarn([]);
+      }
+    }
+
+    function recalcWorldCoords() {
+      state.points.forEach((p) => {
+        p.world = imageToWorld(p.img);
+      });
+      $("pointList").querySelectorAll("li").forEach((li, i) => {
+        const coords = li.querySelector(".point-coords");
+        const p = state.points[i];
+        if (coords && p) coords.textContent = formatCoords(p.world);
+      });
+    }
+
+    function setScale(pixelsPerMeter, scaleLine, auto) {
+      state.pixelsPerMeter = pixelsPerMeter;
+      state.scaleLine = scaleLine;
+      state.scaleAuto = auto;
+      updateScaleStatus(auto);
+      recalcWorldCoords();
+      redraw();
+    }
+
+    /** Plan image at true scale: px per plan-inch = DPI. */
+    function applyAutoScaleFromDpi() {
+      if (!state.img || !$("autoDpi").checked || state.scaleMode !== "ratio") return false;
+      const dpi = parseFloat($("imageDpi").value);
+      const ratioPlan = parseFloat($("ratioPlan").value);
+      const realLen = parseFloat($("ratioReal").value);
+      if (!dpi || !ratioPlan || !realLen || dpi <= 0 || ratioPlan <= 0 || realLen <= 0) return false;
+
+      const planUnit = $("ratioPlanUnit").value;
+      const realUnit = $("ratioRealUnit").value;
+      const pxSpan = ratioPlan * INCHES_PER_PLAN_UNIT[planUnit] * dpi;
+      const realMeters = toMeters(realLen, realUnit);
+      setScale(pxSpan / realMeters, null, true);
+      return true;
+    }
+
+    function tryAutoScale() {
+      if (applyAutoScaleFromDpi()) return true;
+      if (!state.scaleAuto && state.pixelsPerMeter) updateScaleStatus(false);
+      return false;
+    }
+
+    function applyScaleFromPixels(pxDist, realMeters) {
+      if (pxDist < 2 || realMeters <= 0) {
+        $("scaleStatus").textContent = "Scale line too short or invalid distance.";
+        return;
+      }
+      const line =
+        state.pendingClicks.length >= 2
+          ? { a: state.pendingClicks[0], b: state.pendingClicks[1] }
+          : null;
+      setScale(pxDist / realMeters, line, false);
+      state.pendingClicks = [];
+      setMode("origin");
+    }
+
+    function finishScaleRatio() {
+      const px = pixelDistance(state.pendingClicks[0], state.pendingClicks[1]);
+      const realLen = parseFloat($("ratioReal").value);
+      const realUnit = $("ratioRealUnit").value;
+      applyScaleFromPixels(px, toMeters(realLen, realUnit));
+    }
+
+    function imageToWorld(pt) {
+      if (!state.origin || !state.pixelsPerMeter) return null;
+      const dxM = (pt.x - state.origin.x) / state.pixelsPerMeter;
+      const dyM = (pt.y - state.origin.y) / state.pixelsPerMeter;
+      return { x: metersToOutput(dxM), y: metersToOutput(dyM) };
+    }
+
+    function formatWorld(w) {
+      const u = unitLabel();
+      return `X: <span>${w.x.toFixed(2)}</span> ${u} &nbsp; Y: <span>${w.y.toFixed(2)}</span> ${u}`;
+    }
+
+    function updateOriginStatus() {
+      if (!state.origin) {
+        $("originStatus").textContent = "Origin not set.";
+        return;
+      }
+      const w = imageToWorld(state.origin);
+      $("originStatus").textContent =
+        `Origin at image (${state.origin.x.toFixed(0)}, ${state.origin.y.toFixed(0)}) → (0, 0) ${unitLabel()}`;
+    }
+
+    function updateStatus() {
+      if (!state.pixelsPerMeter) $("scaleStatus").textContent = "Scale not set.";
+      else updateScaleStatus(state.scaleAuto);
+      updateOriginStatus();
+    }
+
+    function redraw() {
+      if (!state.img) return;
+      const w = canvas.width;
+      const h = canvas.height;
+      const sx = w / state.img.width;
+      const sy = h / state.img.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.drawImage(state.img, 0, 0, w, h);
+
+      function drawLine(a, b, color) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(a.x * sx, a.y * sy);
+        ctx.lineTo(b.x * sx, b.y * sy);
+        ctx.stroke();
+      }
+
+      function drawDot(pt, color, r = 5) {
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(pt.x * sx, pt.y * sy, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      if (state.scaleLine) {
+        drawLine(state.scaleLine.a, state.scaleLine.b, "#fbbc04");
+        drawDot(state.scaleLine.a, "#fbbc04", 4);
+        drawDot(state.scaleLine.b, "#fbbc04", 4);
+      }
+
+      if (state.pendingClicks.length) {
+        state.pendingClicks.forEach((p) => drawDot(p, "#fbbc04", 5));
+        if (state.pendingClicks.length === 2) {
+          drawLine(state.pendingClicks[0], state.pendingClicks[1], "#fbbc04");
+        }
+      }
+
+      if (state.origin) {
+        drawDot(state.origin, "#34a853", 7);
+        ctx.strokeStyle = "#34a853";
+        ctx.lineWidth = 1;
+        const ox = state.origin.x * sx;
+        const oy = state.origin.y * sy;
+        ctx.beginPath();
+        ctx.moveTo(ox, 0);
+        ctx.lineTo(ox, h);
+        ctx.moveTo(0, oy);
+        ctx.lineTo(w, oy);
+        ctx.stroke();
+      }
+
+      state.points.forEach((p, i) => {
+        if (!p.img) return;
+        drawDot(p.img, "#ea4335", 5);
+        const px = p.img.x * sx;
+        const py = p.img.y * sy;
+        const text = (p.label || defaultPointLabel(i)).trim() || defaultPointLabel(i);
+        ctx.fillStyle = "#fff";
+        ctx.font = "11px system-ui";
+        ctx.strokeStyle = "rgba(0,0,0,0.55)";
+        ctx.lineWidth = 3;
+        ctx.strokeText(text, px + 8, py - 8);
+        ctx.fillText(text, px + 8, py - 8);
+      });
+    }
+
+    function addPoint(imgPt) {
+      const w = imageToWorld(imgPt);
+      if (!w) return;
+      const raw = $("pointLabel").value.trim();
+      const label = raw || defaultPointLabel(state.points.length);
+      const bssid = $("pointBssid").value.trim();
+      state.points.push({ img: imgPt, world: w, label, bssid });
+      $("pointBssid").value = "";
+      renderPointList();
+      $("liveCoords").innerHTML = formatWorld(w);
+      redraw();
+    }
+
+    canvas.addEventListener("click", (evt) => {
+      if (!state.img) return;
+      const pt = canvasPoint(evt);
+
+      if (state.mode === "scaleRatio" || state.mode === "scaleDistance") {
+        state.pendingClicks.push(pt);
+        redraw();
+        if (state.pendingClicks.length >= 2) {
+          if (state.mode === "scaleRatio") finishScaleRatio();
+          else {
+            const px = pixelDistance(state.pendingClicks[0], state.pendingClicks[1]);
+            const d = parseFloat($("knownDistance").value);
+            applyScaleFromPixels(px, toMeters(d, $("knownDistanceUnit").value));
+          }
+        }
+        return;
+      }
+
+      if (state.mode === "origin") {
+        state.origin = pt;
+        updateOriginStatus();
+        setMode("measure");
+        redraw();
+        return;
+      }
+
+      if (state.mode === "measure") {
+        if (!state.pixelsPerMeter) {
+          $("liveCoords").textContent = "Set scale first.";
+          return;
+        }
+        if (!state.origin) {
+          $("liveCoords").textContent = "Set origin first.";
+          return;
+        }
+        addPoint(pt);
+      }
+    });
+
+    canvas.addEventListener("mousemove", (evt) => {
+      if (!state.img || state.mode !== "measure" || !state.origin || !state.pixelsPerMeter) return;
+      const w = imageToWorld(canvasPoint(evt));
+      if (w) $("liveCoords").innerHTML = formatWorld(w);
+    });
+
+    $("btnClearPoints").addEventListener("click", () => {
+      state.points = [];
+      renderPointList();
+      $("liveCoords").textContent = "—";
+      redraw();
+    });
+
+    async function copyJson(text, button, doneLabel) {
+      await navigator.clipboard.writeText(text);
+      const prev = button.textContent;
+      button.textContent = doneLabel;
+      setTimeout(() => { button.textContent = prev; }, 1500);
+    }
+
+    $("btnExportModule").addEventListener("click", async () => {
+      try {
+        const { config, missingBssid } = buildModuleConfig();
+        showExportWarn(missingBssid);
+        const text = JSON.stringify(config, null, 2) + "\n";
+        await copyJson(text, $("btnExportModule"), "Copied!");
+      } catch (err) {
+        $("exportWarn").hidden = false;
+        $("exportWarn").textContent = err.message || String(err);
+      }
+    });
+
+    $("btnDownloadModule").addEventListener("click", () => {
+      try {
+        const { config, missingBssid } = buildModuleConfig();
+        showExportWarn(missingBssid);
+        const blob = new Blob([JSON.stringify(config, null, 2) + "\n"], {
+          type: "application/json",
+        });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        const ssid = (config.scan_ssid || "wifi").replace(/\s+/g, "-");
+        a.download = `module_config_${ssid}.json`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      } catch (err) {
+        $("exportWarn").hidden = false;
+        $("exportWarn").textContent = err.message || String(err);
+      }
+    });
+
+    $("btnImportModule").addEventListener("click", () => $("importModuleFile").click());
+
+    $("importModuleFile").addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      e.target.value = "";
+      if (!file) return;
+      try {
+        const raw = JSON.parse(await file.text());
+        $("scanSsid").value = raw.scan_ssid || "";
+        $("scanCount").value = raw.scan_count ?? 5;
+        $("originXm").value = raw.floor_plan?.x_origin_m ?? 0;
+        $("originYm").value = raw.floor_plan?.y_origin_m ?? 0;
+        state.points = (raw.access_points || []).map((ap) => ({
+          img: null,
+          world: { x: ap.x_m, y: ap.y_m },
+          label: ap.name,
+          bssid: ap.bssid || "",
+        }));
+        if (outputUnit() !== "m") $("unit").value = "m";
+        renderPointList();
+        redraw();
+        $("originStatus").textContent =
+          "Imported positions (m). Re-set origin/scale on the image if you add more APs by clicking.";
+      } catch (err) {
+        $("exportWarn").hidden = false;
+        $("exportWarn").textContent = "Import failed: " + (err.message || err);
+      }
+    });
+
+    $("btnExportLegacy").addEventListener("click", async () => {
+      if (!state.origin || !state.pixelsPerMeter) {
+        $("exportWarn").hidden = false;
+        $("exportWarn").textContent = "Set scale and origin before legacy export.";
+        return;
+      }
+      const payload = {
+        unit: "m",
+        origin: state.origin,
+        pixelsPerMeter: state.pixelsPerMeter,
+        points: state.points.map((p, i) => {
+          const wm = worldMeters(p);
+          return {
+            id: i + 1,
+            label: p.label || defaultPointLabel(i),
+            x: wm?.x ?? 0,
+            y: wm?.y ?? 0,
+            unit: "m",
+          };
+        }),
+      };
+      await copyJson(JSON.stringify(payload, null, 2), $("btnExportLegacy"), "Copied!");
+    });
+
+    $("unit").addEventListener("change", () => {
+      updateScaleStatus(state.scaleAuto);
+      recalcWorldCoords();
+      redraw();
+    });
+  </script>
+</body>
+</html>

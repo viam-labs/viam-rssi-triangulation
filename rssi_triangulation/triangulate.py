@@ -1,0 +1,262 @@
+"""Estimate client position from RSSI and known AP floor-plan coordinates."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+from .registry import AccessPoint, ApRegistry
+
+
+@dataclass(frozen=True)
+class Anchor:
+    ap_name: str
+    x_m: float
+    y_m: float
+    rssi_dbm: float
+
+
+@dataclass(frozen=True)
+class PositionEstimate:
+    x_m: float
+    y_m: float
+    unit: str
+    method: str
+    anchor_count: int
+    anchors_used: tuple[str, ...]
+    residual_rmse_m: float | None = None
+
+    def as_dict(self) -> dict:
+        return {
+            "x_m": self.x_m,
+            "y_m": self.y_m,
+            "unit": self.unit,
+            "method": self.method,
+            "anchor_count": self.anchor_count,
+            "anchors_used": list(self.anchors_used),
+            "residual_rmse_m": self.residual_rmse_m,
+        }
+
+
+def anchors_from_readings(
+    registry: ApRegistry,
+    readings: list[tuple[str, float, float | None]],
+) -> list[Anchor]:
+    """
+    Build one anchor per AP name, keeping the strongest RSSI when duplicates exist.
+
+    readings: (ap_name, rssi_dbm, frequency_mhz optional)
+    """
+    positions = registry.name_to_position
+    best: dict[str, Anchor] = {}
+    for name, rssi, _freq in readings:
+        pos = positions.get(name)
+        if pos is None:
+            continue
+        x, y = pos
+        prev = best.get(name)
+        if prev is None or rssi > prev.rssi_dbm:
+            best[name] = Anchor(ap_name=name, x_m=x, y_m=y, rssi_dbm=rssi)
+    return list(best.values())
+
+
+def filter_anchors(
+    anchors: list[Anchor],
+    *,
+    max_delta_db: float | None = 30.0,
+    min_rssi_dbm: float = -90.0,
+) -> list[Anchor]:
+    """
+    Drop weak/outlier anchors that add noise to the centroid.
+
+    Keeps APs within `max_delta_db` of the strongest signal and above `min_rssi_dbm`.
+    Set max_delta_db to None to disable relative filtering.
+    """
+    if not anchors:
+        return []
+    strongest = max(a.rssi_dbm for a in anchors)
+    kept: list[Anchor] = []
+    for a in anchors:
+        if a.rssi_dbm < min_rssi_dbm:
+            continue
+        if max_delta_db is not None and (strongest - a.rssi_dbm) > max_delta_db:
+            continue
+        kept.append(a)
+    return kept
+
+
+def _weights_from_rssi(anchors: list[Anchor], weight_temperature: float = 2.0) -> list[float]:
+    """
+    Stronger RSSI (less negative) gets higher weight.
+
+    `weight_temperature` softens the falloff: 1.0 weights by linear received power
+    (winner-take-all, jumpy); higher values flatten weights so several anchors
+    contribute and the centroid does not swing when the strongest AP changes.
+    """
+    if not anchors:
+        return []
+    temp = weight_temperature if weight_temperature > 0 else 1.0
+    max_rssi = max(a.rssi_dbm for a in anchors)
+    return [10 ** ((a.rssi_dbm - max_rssi) / (10 * temp)) for a in anchors]
+
+
+def estimate_weighted_centroid(
+    anchors: list[Anchor],
+    unit: str = "m",
+    *,
+    weight_temperature: float = 2.0,
+) -> PositionEstimate | None:
+    if not anchors:
+        return None
+    if len(anchors) == 1:
+        a = anchors[0]
+        return PositionEstimate(
+            x_m=a.x_m,
+            y_m=a.y_m,
+            unit=unit,
+            method="nearest_ap",
+            anchor_count=1,
+            anchors_used=(a.ap_name,),
+            residual_rmse_m=0.0,
+        )
+
+    weights = _weights_from_rssi(anchors, weight_temperature)
+    wsum = sum(weights)
+    x = sum(w * a.x_m for a, w in zip(anchors, weights)) / wsum
+    y = sum(w * a.y_m for a, w in zip(anchors, weights)) / wsum
+    rmse = _weighted_rmse(anchors, x, y, weights)
+    return PositionEstimate(
+        x_m=x,
+        y_m=y,
+        unit=unit,
+        method="weighted_centroid",
+        anchor_count=len(anchors),
+        anchors_used=tuple(a.ap_name for a in anchors),
+        residual_rmse_m=rmse,
+    )
+
+
+def rssi_to_distance_m(
+    rssi_dbm: float,
+    *,
+    tx_power_dbm: float = -40.0,
+    path_loss_n: float = 2.5,
+) -> float:
+    """Log-distance path loss: d meters from RSSI."""
+    return 10 ** ((tx_power_dbm - rssi_dbm) / (10 * path_loss_n))
+
+
+def estimate_path_loss_ls(
+    anchors: list[Anchor],
+    *,
+    unit: str = "m",
+    tx_power_dbm: float = -40.0,
+    path_loss_n: float = 2.5,
+    max_iter: int = 80,
+    learning_rate: float = 0.15,
+) -> PositionEstimate | None:
+    """
+    Refine position by minimizing (geometric distance - path-loss distance)^2.
+    Starts from weighted centroid; requires calibration (tx_power, n).
+    """
+    seed = estimate_weighted_centroid(anchors, unit=unit)
+    if seed is None:
+        return None
+    if len(anchors) < 2:
+        return seed
+
+    x, y = seed.x_m, seed.y_m
+    for _ in range(max_iter):
+        gx, gy = 0.0, 0.0
+        for a in anchors:
+            d_model = rssi_to_distance_m(
+                a.rssi_dbm, tx_power_dbm=tx_power_dbm, path_loss_n=path_loss_n
+            )
+            dx = x - a.x_m
+            dy = y - a.y_m
+            dist = math.hypot(dx, dy)
+            if dist < 0.01:
+                continue
+            err = dist - d_model
+            gx += err * (dx / dist)
+            gy += err * (dy / dist)
+        x -= learning_rate * gx / len(anchors)
+        y -= learning_rate * gy / len(anchors)
+
+    weights = _weights_from_rssi(anchors)
+    rmse = _path_loss_rmse(
+        anchors, x, y, tx_power_dbm=tx_power_dbm, path_loss_n=path_loss_n
+    )
+    return PositionEstimate(
+        x_m=x,
+        y_m=y,
+        unit=unit,
+        method="path_loss_ls",
+        anchor_count=len(anchors),
+        anchors_used=tuple(a.ap_name for a in anchors),
+        residual_rmse_m=rmse,
+    )
+
+
+def estimate_position(
+    registry: ApRegistry,
+    readings: list[tuple[str, float, float | None]],
+    *,
+    method: str = "weighted_centroid",
+    min_anchors: int = 3,
+    tx_power_dbm: float = -40.0,
+    path_loss_n: float = 2.5,
+    max_rssi_delta_db: float | None = 35.0,
+    min_rssi_dbm: float = -90.0,
+    weight_temperature: float = 2.0,
+) -> PositionEstimate | None:
+    anchors = filter_anchors(
+        anchors_from_readings(registry, readings),
+        max_delta_db=max_rssi_delta_db,
+        min_rssi_dbm=min_rssi_dbm,
+    )
+    if len(anchors) < min_anchors:
+        return None
+    unit = registry.unit
+    if method == "path_loss":
+        return estimate_path_loss_ls(
+            anchors,
+            unit=unit,
+            tx_power_dbm=tx_power_dbm,
+            path_loss_n=path_loss_n,
+        )
+    return estimate_weighted_centroid(
+        anchors, unit=unit, weight_temperature=weight_temperature
+    )
+
+
+def _weighted_rmse(
+    anchors: list[Anchor], x: float, y: float, weights: list[float]
+) -> float:
+    wsum = sum(weights)
+    if wsum <= 0:
+        return 0.0
+    err_sq = sum(
+        w * (math.hypot(x - a.x_m, y - a.y_m) ** 2) for a, w in zip(anchors, weights)
+    )
+    return math.sqrt(err_sq / wsum)
+
+
+def _path_loss_rmse(
+    anchors: list[Anchor],
+    x: float,
+    y: float,
+    *,
+    tx_power_dbm: float,
+    path_loss_n: float,
+) -> float:
+    if not anchors:
+        return 0.0
+    errs = []
+    for a in anchors:
+        d_geo = math.hypot(x - a.x_m, y - a.y_m)
+        d_model = rssi_to_distance_m(
+            a.rssi_dbm, tx_power_dbm=tx_power_dbm, path_loss_n=path_loss_n
+        )
+        errs.append(d_geo - d_model)
+    return math.sqrt(sum(e * e for e in errs) / len(errs))
