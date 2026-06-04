@@ -61,6 +61,14 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# WiFi fingerprint calibration (per-machine / per-site)
+fingerprints.sqlite
+fingerprints.sqlite-wal
+fingerprints.sqlite-shm
+**/fingerprints.sqlite
+**/fingerprints.sqlite-wal
+**/fingerprints.sqlite-shm
+
 # Flask stuff:
 instance/
 .webassets-cache
