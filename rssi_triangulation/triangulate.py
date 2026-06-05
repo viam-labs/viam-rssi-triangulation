@@ -14,6 +14,7 @@ class Anchor:
     x_m: float
     y_m: float
     rssi_dbm: float
+    z_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -53,10 +54,10 @@ def anchors_from_readings(
         pos = positions.get(name)
         if pos is None:
             continue
-        x, y = pos
+        x, y, z = pos
         prev = best.get(name)
         if prev is None or rssi > prev.rssi_dbm:
-            best[name] = Anchor(ap_name=name, x_m=x, y_m=y, rssi_dbm=rssi)
+            best[name] = Anchor(ap_name=name, x_m=x, y_m=y, rssi_dbm=rssi, z_m=z)
     return list(best.values())
 
 
@@ -85,6 +86,27 @@ def filter_anchors(
     return kept
 
 
+def distance_3d_m(
+    x: float,
+    y: float,
+    device_z_m: float,
+    anchor: Anchor,
+) -> float:
+    """Slant range from (x, y, device_z) to an anchor in 3D."""
+    dz = device_z_m - anchor.z_m
+    return math.sqrt((x - anchor.x_m) ** 2 + (y - anchor.y_m) ** 2 + dz * dz)
+
+
+def has_vertical_geometry(
+    device_z_m: float,
+    anchors: list[Anchor],
+    *,
+    threshold_m: float = 0.05,
+) -> bool:
+    """True when AP height and device height differ enough to affect range."""
+    return any(abs(device_z_m - a.z_m) > threshold_m for a in anchors)
+
+
 def _weights_from_rssi(anchors: list[Anchor], weight_temperature: float = 2.0) -> list[float]:
     """
     Stronger RSSI (less negative) gets higher weight.
@@ -100,11 +122,73 @@ def _weights_from_rssi(anchors: list[Anchor], weight_temperature: float = 2.0) -
     return [10 ** ((a.rssi_dbm - max_rssi) / (10 * temp)) for a in anchors]
 
 
+def rssi_to_distance_m(
+    rssi_dbm: float,
+    *,
+    tx_power_dbm: float = -40.0,
+    path_loss_n: float = 2.5,
+) -> float:
+    """Log-distance path loss: d meters from RSSI."""
+    return 10 ** ((tx_power_dbm - rssi_dbm) / (10 * path_loss_n))
+
+
+def refine_position_path_loss_3d(
+    x: float,
+    y: float,
+    anchors: list[Anchor],
+    *,
+    device_z_m: float,
+    tx_power_dbm: float = -40.0,
+    path_loss_n: float = 2.5,
+    weight_temperature: float = 2.0,
+    max_iter: int = 80,
+    learning_rate: float = 0.15,
+) -> tuple[float, float]:
+    """
+    Refine (x, y) by minimizing (3D geometric distance - path-loss distance)^2.
+
+    When the device is directly under a ceiling AP, slant range is mostly vertical
+    so horizontal position stays at the AP's x/y instead of being pushed outward.
+    """
+    if len(anchors) < 2:
+        return x, y
+
+    weights = _weights_from_rssi(anchors, weight_temperature)
+    wsum = sum(weights)
+    if wsum <= 0:
+        return x, y
+
+    for _ in range(max_iter):
+        gx, gy = 0.0, 0.0
+        peak_w = max(weights)
+        for a, w in zip(anchors, weights):
+            if w < peak_w * 0.05:
+                continue
+            d_model = rssi_to_distance_m(
+                a.rssi_dbm, tx_power_dbm=tx_power_dbm, path_loss_n=path_loss_n
+            )
+            dx = x - a.x_m
+            dy = y - a.y_m
+            dist = distance_3d_m(x, y, device_z_m, a)
+            if dist < 0.01:
+                continue
+            err = dist - d_model
+            gx += w * err * (dx / dist)
+            gy += w * err * (dy / dist)
+        x -= learning_rate * gx / wsum
+        y -= learning_rate * gy / wsum
+    return x, y
+
+
 def estimate_weighted_centroid(
     anchors: list[Anchor],
     unit: str = "m",
     *,
     weight_temperature: float = 2.0,
+    device_z_m: float = 0.0,
+    tx_power_dbm: float = -40.0,
+    path_loss_n: float = 2.5,
+    refine_3d: bool = True,
 ) -> PositionEstimate | None:
     if not anchors:
         return None
@@ -124,68 +208,101 @@ def estimate_weighted_centroid(
     wsum = sum(weights)
     x = sum(w * a.x_m for a, w in zip(anchors, weights)) / wsum
     y = sum(w * a.y_m for a, w in zip(anchors, weights)) / wsum
-    rmse = _weighted_rmse(anchors, x, y, weights)
+    method = "weighted_centroid"
+    if refine_3d and has_vertical_geometry(device_z_m, anchors):
+        dominant = max(weights)
+        if dominant / wsum >= 0.7:
+            lead = anchors[weights.index(dominant)]
+            d_geo = distance_3d_m(lead.x_m, lead.y_m, device_z_m, lead)
+            d_model = rssi_to_distance_m(
+                lead.rssi_dbm,
+                tx_power_dbm=tx_power_dbm,
+                path_loss_n=path_loss_n,
+            )
+            if abs(d_geo - d_model) <= max(0.5, 0.2 * d_model):
+                x, y = lead.x_m, lead.y_m
+                method = "weighted_centroid_3d"
+            else:
+                x, y = refine_position_path_loss_3d(
+                    lead.x_m,
+                    lead.y_m,
+                    anchors,
+                    device_z_m=device_z_m,
+                    tx_power_dbm=tx_power_dbm,
+                    path_loss_n=path_loss_n,
+                    weight_temperature=weight_temperature,
+                    max_iter=40,
+                )
+                method = "weighted_centroid_3d"
+        else:
+            x, y = refine_position_path_loss_3d(
+                x,
+                y,
+                anchors,
+                device_z_m=device_z_m,
+                tx_power_dbm=tx_power_dbm,
+                path_loss_n=path_loss_n,
+                weight_temperature=weight_temperature,
+                max_iter=40,
+            )
+            method = "weighted_centroid_3d"
+    rmse = _weighted_rmse(anchors, x, y, weights, device_z_m=device_z_m)
     return PositionEstimate(
         x_m=x,
         y_m=y,
         unit=unit,
-        method="weighted_centroid",
+        method=method,
         anchor_count=len(anchors),
         anchors_used=tuple(a.ap_name for a in anchors),
         residual_rmse_m=rmse,
     )
 
 
-def rssi_to_distance_m(
-    rssi_dbm: float,
-    *,
-    tx_power_dbm: float = -40.0,
-    path_loss_n: float = 2.5,
-) -> float:
-    """Log-distance path loss: d meters from RSSI."""
-    return 10 ** ((tx_power_dbm - rssi_dbm) / (10 * path_loss_n))
-
-
 def estimate_path_loss_ls(
     anchors: list[Anchor],
     *,
     unit: str = "m",
+    device_z_m: float = 0.0,
     tx_power_dbm: float = -40.0,
     path_loss_n: float = 2.5,
     max_iter: int = 80,
     learning_rate: float = 0.15,
 ) -> PositionEstimate | None:
     """
-    Refine position by minimizing (geometric distance - path-loss distance)^2.
+    Refine position by minimizing (3D distance - path-loss distance)^2.
     Starts from weighted centroid; requires calibration (tx_power, n).
     """
-    seed = estimate_weighted_centroid(anchors, unit=unit)
+    seed = estimate_weighted_centroid(
+        anchors,
+        unit=unit,
+        device_z_m=device_z_m,
+        tx_power_dbm=tx_power_dbm,
+        path_loss_n=path_loss_n,
+        refine_3d=False,
+    )
     if seed is None:
         return None
     if len(anchors) < 2:
         return seed
 
-    x, y = seed.x_m, seed.y_m
-    for _ in range(max_iter):
-        gx, gy = 0.0, 0.0
-        for a in anchors:
-            d_model = rssi_to_distance_m(
-                a.rssi_dbm, tx_power_dbm=tx_power_dbm, path_loss_n=path_loss_n
-            )
-            dx = x - a.x_m
-            dy = y - a.y_m
-            dist = math.hypot(dx, dy)
-            if dist < 0.01:
-                continue
-            err = dist - d_model
-            gx += err * (dx / dist)
-            gy += err * (dy / dist)
-        x -= learning_rate * gx / len(anchors)
-        y -= learning_rate * gy / len(anchors)
-
-    weights = _weights_from_rssi(anchors)
+    x, y = refine_position_path_loss_3d(
+        seed.x_m,
+        seed.y_m,
+        anchors,
+        device_z_m=device_z_m,
+        tx_power_dbm=tx_power_dbm,
+        path_loss_n=path_loss_n,
+        max_iter=max_iter,
+        learning_rate=learning_rate,
+        weight_temperature=2.0,
+    )
     rmse = _path_loss_rmse(
-        anchors, x, y, tx_power_dbm=tx_power_dbm, path_loss_n=path_loss_n
+        anchors,
+        x,
+        y,
+        device_z_m=device_z_m,
+        tx_power_dbm=tx_power_dbm,
+        path_loss_n=path_loss_n,
     )
     return PositionEstimate(
         x_m=x,
@@ -204,6 +321,7 @@ def estimate_position(
     *,
     method: str = "weighted_centroid",
     min_anchors: int = 3,
+    device_z_m: float = 0.0,
     tx_power_dbm: float = -40.0,
     path_loss_n: float = 2.5,
     max_rssi_delta_db: float | None = 35.0,
@@ -222,22 +340,34 @@ def estimate_position(
         return estimate_path_loss_ls(
             anchors,
             unit=unit,
+            device_z_m=device_z_m,
             tx_power_dbm=tx_power_dbm,
             path_loss_n=path_loss_n,
         )
     return estimate_weighted_centroid(
-        anchors, unit=unit, weight_temperature=weight_temperature
+        anchors,
+        unit=unit,
+        weight_temperature=weight_temperature,
+        device_z_m=device_z_m,
+        tx_power_dbm=tx_power_dbm,
+        path_loss_n=path_loss_n,
     )
 
 
 def _weighted_rmse(
-    anchors: list[Anchor], x: float, y: float, weights: list[float]
+    anchors: list[Anchor],
+    x: float,
+    y: float,
+    weights: list[float],
+    *,
+    device_z_m: float = 0.0,
 ) -> float:
     wsum = sum(weights)
     if wsum <= 0:
         return 0.0
     err_sq = sum(
-        w * (math.hypot(x - a.x_m, y - a.y_m) ** 2) for a, w in zip(anchors, weights)
+        w * (distance_3d_m(x, y, device_z_m, a) ** 2)
+        for a, w in zip(anchors, weights)
     )
     return math.sqrt(err_sq / wsum)
 
@@ -247,6 +377,7 @@ def _path_loss_rmse(
     x: float,
     y: float,
     *,
+    device_z_m: float,
     tx_power_dbm: float,
     path_loss_n: float,
 ) -> float:
@@ -254,7 +385,7 @@ def _path_loss_rmse(
         return 0.0
     errs = []
     for a in anchors:
-        d_geo = math.hypot(x - a.x_m, y - a.y_m)
+        d_geo = distance_3d_m(x, y, device_z_m, a)
         d_model = rssi_to_distance_m(
             a.rssi_dbm, tx_power_dbm=tx_power_dbm, path_loss_n=path_loss_n
         )

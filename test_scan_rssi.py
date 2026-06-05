@@ -44,6 +44,7 @@ from rssi_triangulation.module_config import (
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "examples" / "module_config_viam-5g.json"
 _LAST_POSITION: PositionReading | None = None
+_DEVICE_Z_M: float | None = None
 _FP_STORE: FingerprintStore | None = None
 _FP_STORE_PATH: Path | None = None
 
@@ -66,6 +67,12 @@ def effective_min_samples_per_ap(args: argparse.Namespace, scans_done: int) -> i
     return 2 if scans_done >= 3 else 1
 
 
+def effective_device_z_m(config: LocatorConfig) -> float:
+    if _DEVICE_Z_M is not None:
+        return _DEVICE_Z_M
+    return config.device_z_m
+
+
 def effective_config(args: argparse.Namespace) -> LocatorConfig:
     config = load_config_file(args.config)
     if args.scans is not None:
@@ -74,6 +81,8 @@ def effective_config(args: argparse.Namespace) -> LocatorConfig:
             scan_count=args.scans,
             x_origin_m=config.x_origin_m,
             y_origin_m=config.y_origin_m,
+            device_z_m=config.device_z_m,
+            access_point_z_m=config.access_point_z_m,
             access_points=config.access_points,
         )
     return config
@@ -129,6 +138,7 @@ def format_report(
             "Position:",
             f"  x: {position['location']['x']:.2f} m",
             f"  y: {position['location']['y']:.2f} m",
+            f"  z: {position['location']['z']:.2f} m",
         ]
     )
     aps = position.get("access_points") or []
@@ -136,13 +146,14 @@ def format_report(
         lines.extend(
             [
                 "",
-                f"{'AP':<16} {'RSSI':>8} {'Δx':>8} {'Δy':>8}",
-                "-" * 44,
+                f"{'AP':<16} {'RSSI':>8} {'Δx':>8} {'Δy':>8} {'Δz':>8}",
+                "-" * 52,
             ]
         )
         for ap in aps:
             lines.append(
-                f"{ap['name']:<16} {ap['rssi']:>8.1f} {ap['x']:>8.2f} {ap['y']:>8.2f}"
+                f"{ap['name']:<16} {ap['rssi']:>8.1f} {ap['x']:>8.2f} {ap['y']:>8.2f} "
+                f"{ap['z']:>8.2f}"
             )
     elif matched:
         lines.extend(["", f"{'AP':<16} {'RSSI':>8}", "-" * 28])
@@ -154,6 +165,7 @@ def format_report(
 def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
     config = effective_config(args)
     db = fingerprint_db(args)
+    device_z_m = effective_device_z_m(config)
 
     if args.clear_fingerprints:
         result = execute_fingerprint_command(
@@ -166,6 +178,7 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
             blocking=args.blocking_scan,
             strict_mac=args.strict_mac,
             min_samples_per_ap=args.min_samples_per_ap,
+            device_z_m=device_z_m,
         )
     elif args.list_fingerprints:
         result = execute_fingerprint_command(
@@ -178,6 +191,7 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
             blocking=args.blocking_scan,
             strict_mac=args.strict_mac,
             min_samples_per_ap=args.min_samples_per_ap,
+            device_z_m=device_z_m,
         )
     elif args.delete_fingerprint:
         result = execute_fingerprint_command(
@@ -193,6 +207,7 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
             blocking=args.blocking_scan,
             strict_mac=args.strict_mac,
             min_samples_per_ap=args.min_samples_per_ap,
+            device_z_m=device_z_m,
         )
     elif args.record_fingerprint:
         result = execute_fingerprint_command(
@@ -209,6 +224,7 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
             strict_mac=args.strict_mac,
             min_samples_per_ap=args.min_samples_per_ap,
             scan_count_override=args.scans,
+            device_z_m=device_z_m,
         )
     else:
         return 1
@@ -221,7 +237,7 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
 
 
 def run_once(args: argparse.Namespace) -> int:
-    global _LAST_POSITION
+    global _LAST_POSITION, _DEVICE_Z_M
     t0 = monotonic()
     config = effective_config(args)
     fp_store = (
@@ -230,6 +246,7 @@ def run_once(args: argparse.Namespace) -> int:
 
     raw_position, backend, readings, scans_done, method_used, fp_match = locate_position(
         config,
+        device_z_m=effective_device_z_m(config),
         interface=args.interface,
         backend=args.backend,
         scan_delay_s=effective_scan_delay(args),
@@ -440,6 +457,12 @@ def main() -> int:
         action="store_true",
         help="Delete all fingerprints and exit",
     )
+    fp.add_argument(
+        "--set-device-z-m",
+        type=float,
+        metavar="M",
+        help="Set device/antenna height in meters (same as do_command set_device_z_m)",
+    )
     fp.add_argument("--fingerprint-k", type=int, default=1, metavar="K")
     fp.add_argument(
         "--fingerprint-min-common-aps",
@@ -487,6 +510,10 @@ def main() -> int:
         parser.error("--min-samples-per-ap must be >= 1")
     if not 0 <= args.smoothing_alpha <= 1:
         parser.error("--smoothing-alpha must be between 0 and 1")
+
+    global _DEVICE_Z_M
+    if args.set_device_z_m is not None:
+        _DEVICE_Z_M = float(args.set_device_z_m)
 
     fp_actions = (
         args.record_fingerprint

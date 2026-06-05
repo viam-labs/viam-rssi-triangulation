@@ -22,15 +22,20 @@ from .triangulate import (
 class PositionReading:
     x_m: float
     y_m: float
+    z_m: float = 0.0
 
     def as_dict(self) -> dict:
         return {
             "location": {
                 "x": self.x_m,
                 "y": self.y_m,
+                "z": self.z_m,
                 "unit": "meters",
             }
         }
+
+    def with_z(self, z_m: float) -> PositionReading:
+        return PositionReading(x_m=self.x_m, y_m=self.y_m, z_m=z_m)
 
 
 def access_points_relative_to_position(
@@ -56,6 +61,7 @@ def access_points_relative_to_position(
                 "name": name,
                 "x": ap_x - position.x_m,
                 "y": ap_y - position.y_m,
+                "z": ap.z_m - position.z_m,
                 "unit": "meters",
                 "bssid": ap.bssid,
                 "rssi": rssi_dbm,
@@ -146,19 +152,23 @@ def smooth_position(
 
     dx = current.x_m - previous.x_m
     dy = current.y_m - previous.y_m
+    dz = current.z_m - previous.z_m
     step_x = dx * alpha
     step_y = dy * alpha
+    step_z = dz * alpha
 
     if max_step_m is not None and max_step_m > 0:
-        step = math.hypot(step_x, step_y)
+        step = math.sqrt(step_x * step_x + step_y * step_y + step_z * step_z)
         if step > max_step_m:
             scale = max_step_m / step
             step_x *= scale
             step_y *= scale
+            step_z *= scale
 
     return PositionReading(
         x_m=previous.x_m + step_x,
         y_m=previous.y_m + step_y,
+        z_m=previous.z_m + step_z,
     )
 
 
@@ -261,10 +271,12 @@ def blend_fingerprint_with_centroid(
     blended = PositionReading(
         x_m=centroid.x_m * (1.0 - weight) + fp_match.x_m * weight,
         y_m=centroid.y_m * (1.0 - weight) + fp_match.y_m * weight,
+        z_m=centroid.z_m * (1.0 - weight) + fp_match.z_m * weight,
     )
     annotated = FingerprintMatch(
         x_m=fp_match.x_m,
         y_m=fp_match.y_m,
+        z_m=fp_match.z_m,
         label=fp_match.label,
         distance_db=fp_match.distance_db,
         common_aps=fp_match.common_aps,
@@ -299,6 +311,7 @@ def locate_position(
     fingerprint_max_blend: float = 0.5,
     fingerprint_fallback: bool = True,
     fast_scan: bool = True,
+    device_z_m: float | None = None,
 ) -> tuple[
     PositionReading,
     str,
@@ -350,11 +363,15 @@ def locate_position(
                 max_rms_db=None if method == "hybrid" else fingerprint_max_rms_db,
             )
 
+    effective_device_z = (
+        config.device_z_m if device_z_m is None else device_z_m
+    )
     estimate = estimate_position(
         registry,
         matched,
         method=triangulation_method,
         min_anchors=min_anchors,
+        device_z_m=effective_device_z,
         tx_power_dbm=tx_power_dbm,
         path_loss_n=path_loss_n,
         max_rssi_delta_db=max_rssi_delta_db,
@@ -368,7 +385,7 @@ def locate_position(
             estimate,
             x_origin_m=config.x_origin_m,
             y_origin_m=config.y_origin_m,
-        )
+        ).with_z(effective_device_z)
 
     if method == "hybrid" and has_db:
         if centroid_position is None and fp_match is None:
@@ -377,7 +394,11 @@ def locate_position(
             )
         if centroid_position is None and fp_match is not None:
             return (
-                PositionReading(x_m=fp_match.x_m, y_m=fp_match.y_m),
+                PositionReading(
+                    x_m=fp_match.x_m,
+                    y_m=fp_match.y_m,
+                    z_m=fp_match.z_m,
+                ),
                 backend,
                 aggregated,
                 scans_done,
@@ -405,7 +426,11 @@ def locate_position(
 
     if method == "fingerprint" and fp_match is not None:
         return (
-            PositionReading(x_m=fp_match.x_m, y_m=fp_match.y_m),
+            PositionReading(
+                x_m=fp_match.x_m,
+                y_m=fp_match.y_m,
+                z_m=fp_match.z_m,
+            ),
             backend,
             aggregated,
             scans_done,

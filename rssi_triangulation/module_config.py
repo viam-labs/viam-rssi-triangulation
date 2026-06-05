@@ -16,6 +16,7 @@ class ConfiguredAccessPoint:
     name: str
     x_m: float
     y_m: float
+    z_m: float
     bssid: str
 
 
@@ -25,6 +26,8 @@ class LocatorConfig:
     scan_count: int
     x_origin_m: float
     y_origin_m: float
+    device_z_m: float
+    access_point_z_m: float
     access_points: tuple[ConfiguredAccessPoint, ...]
 
 
@@ -39,6 +42,12 @@ def _float_field(fields: Mapping[str, Any], key: str, *, default: float | None =
     if hasattr(value, "number_value"):
         return float(value.number_value)
     raise ValueError(f"{key!r} must be a number")
+
+
+def _optional_float_field(fields: Mapping[str, Any], key: str) -> float | None:
+    if key not in fields:
+        return None
+    return _float_field(fields, key)
 
 
 def _string_field(fields: Mapping[str, Any], key: str) -> str:
@@ -60,14 +69,34 @@ def _struct_fields(value: Any) -> dict[str, Any]:
     raise ValueError("expected a struct/object")
 
 
-def _parse_access_point_item(item: Any) -> ConfiguredAccessPoint:
+def _config_float(
+    raw: Mapping[str, Any],
+    floor: Mapping[str, Any],
+    key: str,
+    *,
+    default: float = 0.0,
+) -> float:
+    if key in raw:
+        return float(raw[key])
+    if key in floor:
+        return float(floor[key])
+    return default
+
+
+def _parse_access_point_item(
+    item: Any,
+    *,
+    default_z_m: float,
+) -> ConfiguredAccessPoint:
     fields = _struct_fields(item)
     name = _string_field(fields, "name")
     bssid = normalize_mac(_string_field(fields, "bssid"))
+    z_override = _optional_float_field(fields, "z_m")
     return ConfiguredAccessPoint(
         name=name,
         x_m=_float_field(fields, "x_m"),
         y_m=_float_field(fields, "y_m"),
+        z_m=z_override if z_override is not None else default_z_m,
         bssid=bssid,
     )
 
@@ -88,8 +117,13 @@ def parse_config_dict(raw: dict[str, Any]) -> LocatorConfig:
     floor = raw.get("floor_plan") or {}
     x_origin_m = float(floor.get("x_origin_m", 0.0))
     y_origin_m = float(floor.get("y_origin_m", 0.0))
+    device_z_m = _config_float(raw, floor, "device_z_m", default=0.0)
+    access_point_z_m = _config_float(raw, floor, "access_point_z_m", default=0.0)
 
-    aps = tuple(_parse_access_point_item(ap) for ap in raw["access_points"])
+    aps = tuple(
+        _parse_access_point_item(ap, default_z_m=access_point_z_m)
+        for ap in raw["access_points"]
+    )
     if len(aps) < 1:
         raise ValueError("access_points must contain at least one AP")
 
@@ -98,6 +132,8 @@ def parse_config_dict(raw: dict[str, Any]) -> LocatorConfig:
         scan_count=scan_count,
         x_origin_m=x_origin_m,
         y_origin_m=y_origin_m,
+        device_z_m=device_z_m,
+        access_point_z_m=access_point_z_m,
         access_points=aps,
     )
 
@@ -131,7 +167,13 @@ def load_config_file(path: Path | str) -> LocatorConfig:
 def registry_from_config(config: LocatorConfig) -> ApRegistry:
     """Build an ApRegistry used by triangulation from module config."""
     aps = tuple(
-        AccessPoint(ap_name=ap.name, x_m=ap.x_m, y_m=ap.y_m, bssid=ap.bssid)
+        AccessPoint(
+            ap_name=ap.name,
+            x_m=ap.x_m,
+            y_m=ap.y_m,
+            bssid=ap.bssid,
+            z_m=ap.z_m,
+        )
         for ap in config.access_points
     )
     return ApRegistry(scan_ssid=config.scan_ssid, access_points=aps)

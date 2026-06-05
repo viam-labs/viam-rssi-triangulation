@@ -18,12 +18,13 @@ def default_fingerprint_db_path(config_path: Path | None = None) -> Path:
 
 def ap_position_in_reading_frame(
     config: LocatorConfig, ap_name: str
-) -> tuple[float, float]:
+) -> tuple[float, float, float]:
     for ap in config.access_points:
         if ap.name == ap_name:
             return (
                 ap.x_m - config.x_origin_m,
                 ap.y_m - config.y_origin_m,
+                ap.z_m,
             )
     names = ", ".join(a.name for a in config.access_points)
     raise ValueError(f"unknown ap_name {ap_name!r}; configured APs: {names}")
@@ -41,6 +42,7 @@ def execute_fingerprint_command(
     strict_mac: bool = True,
     min_samples_per_ap: int | None = None,
     scan_count_override: int | None = None,
+    device_z_m: float | None = None,
 ) -> dict[str, Any]:
     """
     Run a fingerprint calibration command.
@@ -48,7 +50,7 @@ def execute_fingerprint_command(
     Commands:
       record_fingerprint — { "command": "record_fingerprint", "ap_name": "..." }
       record_fingerprint_here — { "command": "record_fingerprint_here", "label": "...",
-          "x_m": float, "y_m": float }
+          "x_m": float, "y_m": float, optional "z_m": float }
       list_fingerprints — { "command": "list_fingerprints" }
       delete_fingerprint — { "command": "delete_fingerprint", "label": "..." }
       clear_fingerprints — { "command": "clear_fingerprints" }
@@ -69,6 +71,7 @@ def execute_fingerprint_command(
                     "label": r.label,
                     "x_m": r.x_m,
                     "y_m": r.y_m,
+                    "z_m": r.z_m,
                     "ap_count": len(r.rssi_by_ap),
                     "recorded_at": r.recorded_at,
                     "scan_count": r.scan_count,
@@ -101,6 +104,7 @@ def execute_fingerprint_command(
             strict_mac=strict_mac,
             min_samples_per_ap=min_samples_per_ap,
             scan_count_override=scan_count_override,
+            device_z_m=device_z_m,
         )
 
     raise ValueError(
@@ -122,12 +126,16 @@ def _record_fingerprint(
     strict_mac: bool,
     min_samples_per_ap: int | None,
     scan_count_override: int | None,
+    device_z_m: float | None,
 ) -> dict[str, Any]:
+    effective_device_z = (
+        config.device_z_m if device_z_m is None else device_z_m
+    )
     if cmd == "record_fingerprint":
         ap_name = command.get("ap_name") or command.get("label")
         if not isinstance(ap_name, str) or not ap_name:
             raise ValueError('record_fingerprint requires "ap_name"')
-        x_m, y_m = ap_position_in_reading_frame(config, ap_name)
+        x_m, y_m, z_m = ap_position_in_reading_frame(config, ap_name)
         label = ap_name
     else:
         label = command.get("label")
@@ -137,6 +145,11 @@ def _record_fingerprint(
             raise ValueError('record_fingerprint_here requires "x_m" and "y_m"')
         x_m = float(command["x_m"])
         y_m = float(command["y_m"])
+        z_m = (
+            float(command["z_m"])
+            if "z_m" in command
+            else effective_device_z
+        )
 
     scan_count = scan_count_override
     if scan_count is None and "scan_count" in command:
@@ -159,6 +172,7 @@ def _record_fingerprint(
         label,
         x_m=x_m,
         y_m=y_m,
+        z_m=z_m,
         rssi_by_ap=rssi_by_ap,
         scan_count=scans_done,
     )
@@ -168,6 +182,7 @@ def _record_fingerprint(
         "label": record.label,
         "x_m": record.x_m,
         "y_m": record.y_m,
+        "z_m": record.z_m,
         "bssids_heard": len(matched),
         "ap_rssi": record.rssi_by_ap,
         "backend": backend_name,

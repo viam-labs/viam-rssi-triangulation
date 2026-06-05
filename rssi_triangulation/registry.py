@@ -11,6 +11,7 @@ class AccessPoint:
     x_m: float
     y_m: float
     bssid: str
+    z_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -31,5 +32,5 @@ class ApRegistry:
         return out
 
     @property
-    def name_to_position(self) -> dict[str, tuple[float, float]]:
-        return {ap.ap_name: (ap.x_m, ap.y_m) for ap in self.access_points}
+    def name_to_position(self) -> dict[str, tuple[float, float, float]]:
+        return {ap.ap_name: (ap.x_m, ap.y_m, ap.z_m) for ap in self.access_points}

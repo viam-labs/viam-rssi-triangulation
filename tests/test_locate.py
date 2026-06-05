@@ -18,7 +18,7 @@ from rssi_triangulation.triangulate import PositionEstimate
 
 def test_position_reading_output_keys() -> None:
     assert PositionReading(3.0, 4.0).as_dict() == {
-        "location": {"x": 3.0, "y": 4.0, "unit": "meters"},
+        "location": {"x": 3.0, "y": 4.0, "z": 0.0, "unit": "meters"},
     }
 
 
@@ -35,6 +35,22 @@ def test_access_points_relative_to_position(sample_config_dict: dict) -> None:
     assert aps[0]["x"] == pytest.approx(8.0)
     assert aps[0]["y"] == pytest.approx(-4.0)
     assert aps[0]["unit"] == "meters"
+
+
+def test_access_points_include_z_offset(sample_config_dict: dict) -> None:
+    config_dict = {
+        **sample_config_dict,
+        "floor_plan": {
+            **sample_config_dict["floor_plan"],
+            "device_z_m": 1.5,
+            "access_point_z_m": 3.0,
+        },
+    }
+    config = parse_config_dict(config_dict)
+    position = PositionReading(1.0, 2.0, z_m=1.5)
+    matched = [("AP-A", -60.0, None)]
+    aps = access_points_relative_to_position(position, matched, config)
+    assert aps[0]["z"] == pytest.approx(1.5)
 
 
 def test_build_readings_dict_includes_access_points(sample_config_dict: dict) -> None:
@@ -59,6 +75,39 @@ def test_apply_floor_origin() -> None:
     pos = apply_floor_origin(est, x_origin_m=1.0, y_origin_m=2.0)
     assert pos.x_m == 9.0
     assert pos.y_m == 18.0
+
+
+def test_fingerprint_ground_level_z_preserved() -> None:
+    """z_m=0 is valid floor height; must not be treated as unset."""
+    from rssi_triangulation.fingerprint import FingerprintMatch
+
+    fp = FingerprintMatch(
+        x_m=5.0,
+        y_m=10.0,
+        z_m=0.0,
+        label="floor",
+        distance_db=1.0,
+        common_aps=3,
+        k=1,
+        neighbors=("floor",),
+    )
+    pos = PositionReading(x_m=fp.x_m, y_m=fp.y_m, z_m=fp.z_m)
+    assert pos.z_m == 0.0
+
+
+def test_smooth_position_applies_alpha_to_z() -> None:
+    previous = PositionReading(0.0, 0.0, z_m=1.0)
+    current = PositionReading(10.0, 0.0, z_m=3.0)
+    smoothed = smooth_position(previous, current, alpha=0.5, max_step_m=None)
+    assert smoothed.x_m == 5.0
+    assert smoothed.z_m == pytest.approx(2.0)
+
+
+def test_smooth_position_limits_z_step() -> None:
+    previous = PositionReading(0.0, 0.0, z_m=0.0)
+    current = PositionReading(0.0, 0.0, z_m=5.0)
+    smoothed = smooth_position(previous, current, alpha=1.0, max_step_m=1.0)
+    assert smoothed.z_m == pytest.approx(1.0)
 
 
 def test_smooth_position_first_reading_unchanged() -> None:

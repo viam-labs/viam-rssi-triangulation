@@ -3,7 +3,9 @@
   "scan_count": 5,
   "floor_plan": {
     "x_origin_m": 0.0,
-    "y_origin_m": 0.0
+    "y_origin_m": 0.0,
+    "device_z_m": 0.2,
+    "access_point_z_m": 2.44
   },
   "access_points": [
     {

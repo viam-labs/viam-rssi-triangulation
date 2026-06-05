@@ -20,7 +20,9 @@ The sensor and `test_scan_rssi.py` use the same JSON (office example: `examples/
   "scan_count": 5,
   "floor_plan": {
     "x_origin_m": 0,
-    "y_origin_m": 0
+    "y_origin_m": 0,
+    "device_z_m": 1.2,
+    "access_point_z_m": 2.5
   },
   "access_points": [
     {
@@ -41,6 +43,8 @@ The sensor and `test_scan_rssi.py` use the same JSON (office example: `examples/
 | `access_points[].x_m`, `y_m` | AP position on your floor plan, in meters |
 | `access_points[].bssid` | MAC address of that AP’s radio for this SSID |
 | `floor_plan.x_origin_m`, `y_origin_m` | Subtracted from the estimated position (usually `0`) |
+| `floor_plan.device_z_m` (or top-level `device_z_m`) | Antenna height above floor, in meters (`0`); used in 3D range math |
+| `floor_plan.access_point_z_m` (or top-level) | Default AP mount height; per-AP override with `access_points[].z_m` |
 
 ## Methods
 
@@ -57,6 +61,7 @@ Scans WiFi, estimates position, and returns coordinates in the configured floor-
   "location": {
     "x": 12.34,
     "y": 56.78,
+    "z": 1.2,
     "unit": "meters"
   },
   "access_points": [
@@ -64,6 +69,7 @@ Scans WiFi, estimates position, and returns coordinates in the configured floor-
       "name": "WoStairsY",
       "x": 10.57,
       "y": -52.92,
+      "z": 1.3,
       "unit": "meters",
       "bssid": "be:9c:6c:2e:de:2c",
       "rssi": -67.0
@@ -72,7 +78,7 @@ Scans WiFi, estimates position, and returns coordinates in the configured floor-
 }
 ```
 
-`access_points` lists configured APs heard on this scan, **strongest RSSI first**. Each `x` / `y` is the offset from your estimated position to that AP (AP position minus current position), in meters — not absolute floor coordinates.
+`location.z` is the device/antenna height above the floor (from `device_z_m` in config, or updated at runtime via **`set_device_z_m`**). Positioning uses **3D slant range** when AP and device heights differ: standing under a ceiling AP no longer looks meters away in x/y just because the radio is 2.5 m above you. `access_points` lists configured APs heard on this scan, **strongest RSSI first**. Each `x` / `y` / `z` is the offset from your estimated position to that AP (AP position minus current position), in meters — not absolute floor coordinates.
 
 Default positioning uses **`method`: `hybrid`** (weighted centroid blended with fingerprints when a calibration DB exists; falls back to centroid alone if empty). See [Positioning options](#positioning-options) for tuning.
 
@@ -86,7 +92,7 @@ async with Machine.create_from_address("<machine-address>", "<api-key>", "<api-k
     sensor = Sensor.from_name("wifi-position")
     readings = await sensor.get_readings()
     loc = readings["location"]
-    print(loc["x"], loc["y"], loc["unit"])
+    print(loc["x"], loc["y"], loc["z"], loc["unit"])
 ```
 
 **Local wrapper:**
@@ -129,8 +135,20 @@ Every request must include a **`command`** string. All responses include **`ok`*
 | `list_fingerprints` | List all stored fingerprints |
 | `delete_fingerprint` | Remove one fingerprint by label |
 | `clear_fingerprints` | Remove all fingerprints |
+| `set_device_z_m` | Set device/antenna height in meters for subsequent `get_readings` |
 
-**`record_fingerprint`** — stand under the AP; position is taken from `access_points[]` (minus `floor_plan` origin):
+**`set_device_z_m`** — update antenna height without restarting the module:
+
+```json
+{
+  "command": "set_device_z_m",
+  "z_m": 1.2
+}
+```
+
+Response: `{ "ok": true, "command": "set_device_z_m", "z_m": 1.2 }`.
+
+**`record_fingerprint`** — stand under the AP; position is taken from `access_points[]` (minus `floor_plan` origin, including `z_m`):
 
 ```json
 {
@@ -152,7 +170,7 @@ Every request must include a **`command`** string. All responses include **`ok`*
 }
 ```
 
-`x_m` / `y_m` are in the same coordinate frame as **`get_readings`** output (after origin subtraction).
+`x_m` / `y_m` are in the same coordinate frame as **`get_readings`** output (after origin subtraction). Optional **`z_m`** defaults to the current device height (`device_z_m` or the value set by **`set_device_z_m`**).
 
 **`list_fingerprints`**:
 
@@ -242,9 +260,10 @@ sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --list-fingerprints
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --delete-fingerprint "Cafe, WoH1"
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --clear-fingerprints
+sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --set-device-z-m 1.2 --once
 ```
 
-Default DB path: `<config-dir>/fingerprints.sqlite` (e.g. `examples/fingerprints.sqlite`). Override with **`--fingerprint-db`**.
+Default DB path: `<config-dir>/fingerprints.sqlite` (e.g. `examples/fingerprints.sqlite`). Override with **`--fingerprint-db`**. **`--set-device-z-m`** mirrors **`set_device_z_m`** for the local wrapper (use with **`--once`** or **`--interval`** in the same invocation).
 
 ### Positioning options
 

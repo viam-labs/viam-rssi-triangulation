@@ -17,6 +17,7 @@ class FingerprintRecord:
     label: str
     x_m: float
     y_m: float
+    z_m: float
     rssi_by_ap: dict[str, float]
     recorded_at: str
     scan_count: int
@@ -26,6 +27,7 @@ class FingerprintRecord:
 class FingerprintMatch:
     x_m: float
     y_m: float
+    z_m: float
     label: str
     distance_db: float
     common_aps: int
@@ -136,12 +138,21 @@ class FingerprintStore:
                         label TEXT NOT NULL UNIQUE,
                         x_m REAL NOT NULL,
                         y_m REAL NOT NULL,
+                        z_m REAL NOT NULL DEFAULT 0,
                         rssi_json TEXT NOT NULL,
                         recorded_at TEXT NOT NULL,
                         scan_count INTEGER NOT NULL
                     )
                     """
                 )
+                cols = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(fingerprints)")
+                }
+                if "z_m" not in cols:
+                    conn.execute(
+                        "ALTER TABLE fingerprints ADD COLUMN z_m REAL NOT NULL DEFAULT 0"
+                    )
                 conn.commit()
 
     def record(
@@ -150,6 +161,7 @@ class FingerprintStore:
         *,
         x_m: float,
         y_m: float,
+        z_m: float = 0.0,
         rssi_by_ap: dict[str, float],
         scan_count: int,
     ) -> FingerprintRecord:
@@ -161,16 +173,17 @@ class FingerprintStore:
             with self._connect() as conn:
                 conn.execute(
                     """
-                    INSERT INTO fingerprints (label, x_m, y_m, rssi_json, recorded_at, scan_count)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO fingerprints (label, x_m, y_m, z_m, rssi_json, recorded_at, scan_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(label) DO UPDATE SET
                         x_m = excluded.x_m,
                         y_m = excluded.y_m,
+                        z_m = excluded.z_m,
                         rssi_json = excluded.rssi_json,
                         recorded_at = excluded.recorded_at,
                         scan_count = excluded.scan_count
                     """,
-                    (label, x_m, y_m, payload, recorded_at, scan_count),
+                    (label, x_m, y_m, z_m, payload, recorded_at, scan_count),
                 )
                 row_id = conn.execute(
                     "SELECT id FROM fingerprints WHERE label = ?", (label,)
@@ -182,6 +195,7 @@ class FingerprintStore:
             label=label,
             x_m=x_m,
             y_m=y_m,
+            z_m=z_m,
             rssi_by_ap=rssi_by_ap,
             recorded_at=recorded_at,
             scan_count=scan_count,
@@ -194,7 +208,7 @@ class FingerprintStore:
                 return list(self._cache)
             with self._connect() as conn:
                 rows = conn.execute(
-                    "SELECT id, label, x_m, y_m, rssi_json, recorded_at, scan_count "
+                    "SELECT id, label, x_m, y_m, z_m, rssi_json, recorded_at, scan_count "
                     "FROM fingerprints ORDER BY label"
                 ).fetchall()
             self._cache = [_row_to_record(row) for row in rows]
@@ -267,10 +281,12 @@ class FingerprintStore:
         wsum = sum(weights)
         x = sum(w * fp.x_m for (_, _, fp), w in zip(top, weights)) / wsum
         y = sum(w * fp.y_m for (_, _, fp), w in zip(top, weights)) / wsum
+        z = sum(w * fp.z_m for (_, _, fp), w in zip(top, weights)) / wsum
         best_dist, best_common, best_fp = top[0]
         return FingerprintMatch(
             x_m=x,
             y_m=y,
+            z_m=z,
             label=best_fp.label,
             distance_db=best_dist,
             common_aps=best_common,
@@ -280,11 +296,14 @@ class FingerprintStore:
 
 
 def _row_to_record(row: sqlite3.Row) -> FingerprintRecord:
+    keys = row.keys()
+    z_m = float(row["z_m"]) if "z_m" in keys else 0.0
     return FingerprintRecord(
         id=int(row["id"]),
         label=str(row["label"]),
         x_m=float(row["x_m"]),
         y_m=float(row["y_m"]),
+        z_m=z_m,
         rssi_by_ap=json.loads(row["rssi_json"]),
         recorded_at=str(row["recorded_at"]),
         scan_count=int(row["scan_count"]),

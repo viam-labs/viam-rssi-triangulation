@@ -89,9 +89,46 @@ def test_knn_interpolates_between_fingerprints(tmp_path) -> None:
 
 def test_ap_position_in_reading_frame(sample_config_dict: dict) -> None:
     config = parse_config_dict(sample_config_dict)
-    x, y = ap_position_in_reading_frame(config, "AP-B")
+    x, y, z = ap_position_in_reading_frame(config, "AP-B")
     assert x == pytest.approx(9.0)
     assert y == pytest.approx(-2.0)
+    assert z == pytest.approx(0.0)
+
+
+def test_ap_position_includes_configured_z() -> None:
+    config = parse_config_dict(
+        {
+            "scan_ssid": "X",
+            "scan_count": 1,
+            "access_point_z_m": 2.0,
+            "access_points": [
+                {
+                    "name": "High",
+                    "x_m": 5.0,
+                    "y_m": 0.0,
+                    "z_m": 5.5,
+                    "bssid": "aa:bb:cc:dd:ee:00",
+                },
+            ],
+        }
+    )
+    x, y, z = ap_position_in_reading_frame(config, "High")
+    assert x == pytest.approx(5.0)
+    assert z == pytest.approx(5.5)
+
+
+def test_fingerprint_record_stores_z_m(tmp_path) -> None:
+    db = FingerprintStore(tmp_path / "fp.sqlite")
+    record = db.record(
+        "spot",
+        x_m=1.0,
+        y_m=2.0,
+        z_m=1.5,
+        rssi_by_ap={"AP-A": -50.0},
+        scan_count=1,
+    )
+    assert record.z_m == 1.5
+    assert db.list_all()[0].z_m == 1.5
 
 
 def test_list_and_clear_commands(tmp_path, sample_config_dict: dict) -> None:
@@ -152,11 +189,40 @@ def test_min_common_fraction_blocks_weak_overlap(tmp_path) -> None:
     )
 
 
+def test_fingerprint_match_averages_z_m(tmp_path) -> None:
+    db = FingerprintStore(tmp_path / "fp.sqlite")
+    db.record(
+        "low",
+        x_m=0.0,
+        y_m=0.0,
+        z_m=1.0,
+        rssi_by_ap={"AP-A": -50.0, "AP-B": -80.0},
+        scan_count=1,
+    )
+    db.record(
+        "high",
+        x_m=10.0,
+        y_m=0.0,
+        z_m=3.0,
+        rssi_by_ap={"AP-A": -80.0, "AP-B": -50.0},
+        scan_count=1,
+    )
+    match = db.match(
+        {"AP-A": -65.0, "AP-B": -65.0},
+        k=2,
+        min_common_aps=2,
+        max_rms_db=50.0,
+    )
+    assert match is not None
+    assert match.z_m == pytest.approx(2.0, abs=0.5)
+
+
 def test_blend_pulls_toward_fingerprint() -> None:
-    centroid = PositionReading(0.0, 0.0)
+    centroid = PositionReading(0.0, 0.0, z_m=0.5)
     fp = FingerprintMatch(
         x_m=10.0,
         y_m=0.0,
+        z_m=2.0,
         label="east",
         distance_db=2.0,
         common_aps=5,
@@ -173,12 +239,14 @@ def test_blend_pulls_toward_fingerprint() -> None:
     assert annotated.blend_weight > 0
     assert 0 < blended.x_m < 10.0
     assert blended.y_m == pytest.approx(0.0)
+    assert 0.5 < blended.z_m < 2.0
 
 
 def test_fingerprint_confidence_zero_beyond_max_rms() -> None:
     fp = FingerprintMatch(
         x_m=0.0,
         y_m=0.0,
+        z_m=0.0,
         label="a",
         distance_db=12.0,
         common_aps=4,

@@ -87,6 +87,7 @@ class RssiPositionSensor(Sensor, EasyResource):
     _max_position_step_m: float | None
     _last_position: PositionReading | None
     _fingerprint_store: FingerprintStore | None
+    _device_z_m: float
 
     @classmethod
     def new(
@@ -195,6 +196,7 @@ class RssiPositionSensor(Sensor, EasyResource):
         )
         sensor._last_position = None
         sensor._fingerprint_store = None
+        sensor._device_z_m = sensor._config.device_z_m
         return sensor
 
     def _get_fingerprint_store(self) -> FingerprintStore:
@@ -222,9 +224,10 @@ class RssiPositionSensor(Sensor, EasyResource):
             if self._method in ("fingerprint", "hybrid")
             else None
         )
-        raw_position, backend, readings, scans, method_used, fp_match = await asyncio.to_thread(
+        raw_xy, backend, readings, scans, method_used, fp_match = await asyncio.to_thread(
             locate_position,
             self._config,
+            device_z_m=self._device_z_m,
             interface=self._interface,
             backend=self._backend,
             scan_delay_s=self._scan_delay_s,
@@ -247,6 +250,7 @@ class RssiPositionSensor(Sensor, EasyResource):
             fingerprint_fallback=self._fingerprint_fallback,
             fast_scan=self._fast_scan,
         )
+        raw_position = raw_xy
         position = smooth_position(
             self._last_position,
             raw_position,
@@ -268,9 +272,10 @@ class RssiPositionSensor(Sensor, EasyResource):
                 f"{blend} neighbors={','.join(fp_match.neighbors)}"
             )
         self.logger.debug(
-            "position (%.2f, %.2f) m raw (%.2f, %.2f) via %s (%s%s), %d BSSIDs on SSID, %d scans",
+            "position (%.2f, %.2f, %.2f) m raw (%.2f, %.2f) via %s (%s%s), %d BSSIDs on SSID, %d scans",
             position.x_m,
             position.y_m,
+            position.z_m,
             raw_position.x_m,
             raw_position.y_m,
             backend,
@@ -296,6 +301,15 @@ class RssiPositionSensor(Sensor, EasyResource):
     ) -> Mapping[str, ValueTypes]:
         del timeout, kwargs
         cmd = _command_dict(command)
+        if cmd.get("command") == "set_device_z_m":
+            if "z_m" not in cmd:
+                raise ValueError('set_device_z_m requires "z_m"')
+            self._device_z_m = float(cmd["z_m"])
+            return {
+                "ok": True,
+                "command": "set_device_z_m",
+                "z_m": self._device_z_m,
+            }
         result = await asyncio.to_thread(
             execute_fingerprint_command,
             cmd,
@@ -307,5 +321,6 @@ class RssiPositionSensor(Sensor, EasyResource):
             blocking=self._blocking_scan,
             strict_mac=self._strict_mac,
             min_samples_per_ap=self._min_samples_per_ap,
+            device_z_m=self._device_z_m,
         )
         return result

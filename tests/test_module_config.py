@@ -15,6 +15,64 @@ def test_parse_config_dict(sample_config_dict: dict) -> None:
     assert cfg.access_points[0].bssid == "aa:bb:cc:dd:ee:01"
 
 
+def test_parse_config_height_defaults() -> None:
+    cfg = parse_config_dict(
+        {
+            "scan_ssid": "X",
+            "scan_count": 1,
+            "access_points": [
+                {"name": "A", "x_m": 0, "y_m": 0, "bssid": "aa:bb:cc:dd:ee:00"},
+            ],
+        }
+    )
+    assert cfg.device_z_m == 0.0
+    assert cfg.access_point_z_m == 0.0
+    assert cfg.access_points[0].z_m == 0.0
+
+
+def test_parse_config_heights_top_level_and_per_ap() -> None:
+    cfg = parse_config_dict(
+        {
+            "scan_ssid": "X",
+            "scan_count": 1,
+            "device_z_m": 1.2,
+            "access_point_z_m": 2.5,
+            "access_points": [
+                {"name": "A", "x_m": 0, "y_m": 0, "bssid": "aa:bb:cc:dd:ee:00"},
+                {
+                    "name": "B",
+                    "x_m": 1,
+                    "y_m": 0,
+                    "z_m": 4.0,
+                    "bssid": "aa:bb:cc:dd:ee:01",
+                },
+            ],
+        }
+    )
+    assert cfg.device_z_m == 1.2
+    assert cfg.access_point_z_m == 2.5
+    assert cfg.access_points[0].z_m == 2.5
+    assert cfg.access_points[1].z_m == 4.0
+
+
+def test_parse_config_heights_in_floor_plan() -> None:
+    cfg = parse_config_dict(
+        {
+            "scan_ssid": "X",
+            "scan_count": 1,
+            "floor_plan": {
+                "device_z_m": 0.8,
+                "access_point_z_m": 3.1,
+            },
+            "access_points": [
+                {"name": "A", "x_m": 0, "y_m": 0, "bssid": "aa:bb:cc:dd:ee:00"},
+            ],
+        }
+    )
+    assert cfg.device_z_m == 0.8
+    assert cfg.access_point_z_m == 3.1
+
+
 def test_parse_config_defaults_floor_origin() -> None:
     cfg = parse_config_dict(
         {
