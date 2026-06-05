@@ -13,8 +13,7 @@ from rssi_triangulation.triangulate import PositionEstimate
 
 def test_position_reading_output_keys() -> None:
     assert PositionReading(3.0, 4.0).as_dict() == {
-        "position_x_m": 3.0,
-        "position_y_m": 4.0,
+        "location": {"x": 3.0, "y": 4.0, "unit": "meters"},
     }
 
 

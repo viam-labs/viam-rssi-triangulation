@@ -23,8 +23,14 @@ class PositionReading:
     x_m: float
     y_m: float
 
-    def as_dict(self) -> dict[str, float]:
-        return {"position_x_m": self.x_m, "position_y_m": self.y_m}
+    def as_dict(self) -> dict:
+        return {
+            "location": {
+                "x": self.x_m,
+                "y": self.y_m,
+                "unit": "meters",
+            }
+        }
 
 
 def bssid_lookup_from_registry(

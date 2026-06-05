@@ -2,8 +2,8 @@
   "$schema": "https://dl.viam.dev/module.schema.json",
   "module_id": "viam-labs:rssi-triangulation",
   "visibility": "private",
-  "url": "",
-  "description": "Estimate floor-plan X/Y from WiFi RSSI to configured access points (any vendor).",
+  "url": "https://github.com/viam-labs/viam-rssi-triangulation",
+  "description": "Estimate floor-plan X/Y from WiFi RSSI to configured access points.",
   "models": [
     {
       "api": "rdk:component:sensor",

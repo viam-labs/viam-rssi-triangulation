@@ -42,7 +42,13 @@ The sensor and `test_scan_rssi.py` use the same JSON (office example: `examples/
 | `access_points[].bssid` | MAC address of that AP’s radio for this SSID |
 | `floor_plan.x_origin_m`, `y_origin_m` | Subtracted from the estimated position (usually `0`) |
 
-`get_readings()` returns `{ "position_x_m": …, "position_y_m": … }`.
+## Methods
+
+`get_readings()` returns:
+
+```json
+{ "location": { "x": 12.34, "y": 56.78, "unit": "meters" } }
+```
 
 Accuracy defaults:
 

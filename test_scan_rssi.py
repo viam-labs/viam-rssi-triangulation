@@ -126,8 +126,8 @@ def format_report(
             f"Known APs matched: {len(matched)} / {len(config.access_points)}",
             "",
             "Position:",
-            f"  position_x_m: {position['position_x_m']:.2f}",
-            f"  position_y_m: {position['position_y_m']:.2f}",
+            f"  x: {position['location']['x']:.2f} m",
+            f"  y: {position['location']['y']:.2f} m",
         ]
     )
     if matched:
