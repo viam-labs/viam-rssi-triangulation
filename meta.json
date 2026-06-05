@@ -13,6 +13,8 @@
   "entrypoint": "run.sh",
   "build": {
     "setup": "./setup.sh",
-    "build": "./build.sh"
+    "build": "./build.sh",
+    "path": "module.tar.gz",
+    "arch": ["linux/amd64", "linux/arm64"]
   }
 }
