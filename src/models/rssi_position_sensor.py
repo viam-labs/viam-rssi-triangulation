@@ -18,8 +18,18 @@ from viam.utils import SensorReading, ValueTypes
 
 from rssi_triangulation.fingerprint import FingerprintStore
 from rssi_triangulation.fingerprint_commands import execute_fingerprint_command
-from rssi_triangulation.locate import PositionReading, locate_position, smooth_position
-from rssi_triangulation.module_config import LocatorConfig, parse_component_config
+from rssi_triangulation.locate import (
+    PositionReading,
+    build_readings_dict,
+    locate_position,
+    match_readings_to_aps,
+    smooth_position,
+)
+from rssi_triangulation.module_config import (
+    LocatorConfig,
+    parse_component_config,
+    registry_from_config,
+)
 
 MODEL: ClassVar[Model] = Model(
     ModelFamily("viam-labs", "rssi-triangulation"),
@@ -269,7 +279,13 @@ class RssiPositionSensor(Sensor, EasyResource):
             len(readings),
             scans,
         )
-        return position.as_dict()
+        matched = match_readings_to_aps(
+            readings,
+            registry_from_config(self._config),
+            strict_mac=self._strict_mac,
+            min_sample_count=self._min_samples_per_ap or (2 if scans >= 3 else 1),
+        )
+        return build_readings_dict(position, matched, self._config)
 
     async def do_command(
         self,

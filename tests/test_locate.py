@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import pytest
+
 from rssi_triangulation.aggregate import AggregatedWifiReading
 from rssi_triangulation.locate import (
     PositionReading,
+    access_points_relative_to_position,
     apply_floor_origin,
+    build_readings_dict,
     match_readings_to_aps,
     smooth_position,
 )
+from rssi_triangulation.module_config import parse_config_dict
 from rssi_triangulation.registry import ApRegistry
 from rssi_triangulation.triangulate import PositionEstimate
 
@@ -15,6 +20,31 @@ def test_position_reading_output_keys() -> None:
     assert PositionReading(3.0, 4.0).as_dict() == {
         "location": {"x": 3.0, "y": 4.0, "unit": "meters"},
     }
+
+
+def test_access_points_relative_to_position(sample_config_dict: dict) -> None:
+    config = parse_config_dict(sample_config_dict)
+    position = PositionReading(1.0, 2.0)
+    matched = [("AP-B", -55.0, None), ("AP-A", -70.0, None)]
+    aps = access_points_relative_to_position(position, matched, config)
+    assert len(aps) == 2
+    assert aps[0]["name"] == "AP-B"
+    assert aps[0]["rssi"] == -55.0
+    assert aps[0]["bssid"] == "aa:bb:cc:dd:ee:02"
+    # AP-B at (9, -2) in reading frame → offset (8, -4) from (1, 2)
+    assert aps[0]["x"] == pytest.approx(8.0)
+    assert aps[0]["y"] == pytest.approx(-4.0)
+    assert aps[0]["unit"] == "meters"
+
+
+def test_build_readings_dict_includes_access_points(sample_config_dict: dict) -> None:
+    config = parse_config_dict(sample_config_dict)
+    position = PositionReading(0.0, 0.0)
+    matched = [("AP-A", -60.0, None)]
+    payload = build_readings_dict(position, matched, config)
+    assert "location" in payload
+    assert len(payload["access_points"]) == 1
+    assert payload["access_points"][0]["name"] == "AP-A"
 
 
 def test_apply_floor_origin() -> None:

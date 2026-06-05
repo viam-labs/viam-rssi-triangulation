@@ -31,6 +31,7 @@ from rssi_triangulation.fingerprint_commands import (
 from rssi_triangulation.fingerprint import FingerprintMatch
 from rssi_triangulation.locate import (
     PositionReading,
+    build_readings_dict,
     locate_position,
     match_readings_to_aps,
     smooth_position,
@@ -130,7 +131,20 @@ def format_report(
             f"  y: {position['location']['y']:.2f} m",
         ]
     )
-    if matched:
+    aps = position.get("access_points") or []
+    if aps:
+        lines.extend(
+            [
+                "",
+                f"{'AP':<16} {'RSSI':>8} {'Δx':>8} {'Δy':>8}",
+                "-" * 44,
+            ]
+        )
+        for ap in aps:
+            lines.append(
+                f"{ap['name']:<16} {ap['rssi']:>8.1f} {ap['x']:>8.2f} {ap['y']:>8.2f}"
+            )
+    elif matched:
         lines.extend(["", f"{'AP':<16} {'RSSI':>8}", "-" * 28])
         for name, rssi, _ in matched:
             lines.append(f"{name:<16} {rssi:>8.1f}")
@@ -255,8 +269,8 @@ def run_once(args: argparse.Namespace) -> int:
         strict_mac=args.strict_mac,
         min_sample_count=effective_min_samples_per_ap(args, scans_done),
     )
-    payload = position.as_dict()
-    raw_payload = raw_position.as_dict()
+    payload = build_readings_dict(position, matched, config)
+    raw_payload = build_readings_dict(raw_position, matched, config)
 
     if args.json:
         out: dict = {

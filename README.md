@@ -58,9 +58,21 @@ Scans WiFi, estimates position, and returns coordinates in the configured floor-
     "x": 12.34,
     "y": 56.78,
     "unit": "meters"
-  }
+  },
+  "access_points": [
+    {
+      "name": "WoStairsY",
+      "x": 10.57,
+      "y": -52.92,
+      "unit": "meters",
+      "bssid": "be:9c:6c:2e:de:2c",
+      "rssi": -67.0
+    }
+  ]
 }
 ```
+
+`access_points` lists configured APs heard on this scan, **strongest RSSI first**. Each `x` / `y` is the offset from your estimated position to that AP (AP position minus current position), in meters — not absolute floor coordinates.
 
 Default positioning uses **`method`: `hybrid`** (weighted centroid blended with fingerprints when a calibration DB exists; falls back to centroid alone if empty). See [Positioning options](#positioning-options) for tuning.
 

@@ -33,6 +33,50 @@ class PositionReading:
         }
 
 
+def access_points_relative_to_position(
+    position: PositionReading,
+    matched: list[tuple[str, float, float | None]],
+    config: LocatorConfig,
+) -> list[dict]:
+    """
+    APs heard this scan, strongest RSSI first.
+
+    x/y are offsets from ``position`` to each AP (AP − current), in meters.
+    """
+    ap_by_name = {ap.name: ap for ap in config.access_points}
+    rows: list[dict] = []
+    for name, rssi_dbm, _freq in sorted(matched, key=lambda t: t[1], reverse=True):
+        ap = ap_by_name.get(name)
+        if ap is None:
+            continue
+        ap_x = ap.x_m - config.x_origin_m
+        ap_y = ap.y_m - config.y_origin_m
+        rows.append(
+            {
+                "name": name,
+                "x": ap_x - position.x_m,
+                "y": ap_y - position.y_m,
+                "unit": "meters",
+                "bssid": ap.bssid,
+                "rssi": rssi_dbm,
+            }
+        )
+    return rows
+
+
+def build_readings_dict(
+    position: PositionReading,
+    matched: list[tuple[str, float, float | None]],
+    config: LocatorConfig,
+) -> dict:
+    """Full sensor payload for get_readings / local wrapper."""
+    payload = position.as_dict()
+    payload["access_points"] = access_points_relative_to_position(
+        position, matched, config
+    )
+    return payload
+
+
 def bssid_lookup_from_registry(
     registry: ApRegistry,
     *,
