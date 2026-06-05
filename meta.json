@@ -1,7 +1,7 @@
 {
   "$schema": "https://dl.viam.dev/module.schema.json",
   "module_id": "viam-labs:rssi-triangulation",
-  "visibility": "private",
+  "visibility": "public",
   "url": "https://github.com/viam-labs/viam-rssi-triangulation",
   "description": "Estimate floor-plan X/Y from WiFi RSSI to configured access points.",
   "models": [
@@ -10,7 +10,7 @@
       "model": "viam-labs:rssi-triangulation:wifi-position"
     }
   ],
-  "entrypoint": "src/main.py",
+  "entrypoint": "run.sh",
   "build": {
     "setup": "./setup.sh",
     "build": "./build.sh"

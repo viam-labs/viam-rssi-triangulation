@@ -224,9 +224,12 @@ On Raspberry Pi OS, if venv creation fails: `sudo apt install -y python3-venv py
 Model: `viam-labs:rssi-triangulation:wifi-position` (sensor).
 
 ```bash
+chmod +x run.sh setup.sh build.sh
 ./setup.sh
 viam module reload-local --part-id <part-id> \
   --model-name viam-labs:rssi-triangulation:wifi-position --name wifi-position
 ```
+
+`meta.json` entrypoint is `run.sh`, which activates `.venv` and runs `src/main.py`.
 
 Paste your module config JSON into the component attributes in the Viam app.
