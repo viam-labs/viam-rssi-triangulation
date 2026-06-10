@@ -80,7 +80,7 @@ Scans WiFi, estimates position, and returns coordinates in the configured floor-
 
 `location.z` is the device/antenna height above the floor (from `device_z_m` in config, or updated at runtime via **`set_device_z_m`**). Positioning uses **3D slant range** when AP and device heights differ: standing under a ceiling AP no longer looks meters away in x/y just because the radio is 2.5 m above you. `access_points` lists configured APs heard on this scan, **strongest RSSI first**. Each `x` / `y` / `z` is the offset from your estimated position to that AP (AP position minus current position), in meters — not absolute floor coordinates.
 
-Default positioning uses **`method`: `hybrid`** (weighted centroid blended with fingerprints when a calibration DB exists; falls back to centroid alone if empty). See [Positioning options](#positioning-options) for tuning.
+There is one positioning behavior: a **weighted centroid** (with 3D path-loss refinement), automatically **blended with fingerprint matches** in proportion to their confidence when a calibration DB exists. With no fingerprints it's pure geometry; the reported `method` field tells you what happened on each reading (`weighted_centroid`, `hybrid`, or `fingerprint`). See [Positioning options](#positioning-options) for tuning.
 
 **Viam SDK (Python):**
 
@@ -120,9 +120,10 @@ Set **`fingerprint_db_path`** on the component (default: `fingerprints.sqlite` i
 1. Configure `scan_ssid`, `access_points`, and other attributes as usual.
 2. Stand under each AP (or at a known spot) and call **`record_fingerprint`** (or **`record_fingerprint_here`**).
 3. Call **`list_fingerprints`** to verify entries.
-4. **`get_readings`** uses the DB automatically when `method` is `hybrid` (default) or `fingerprint`.
+4. **`get_readings`** uses the DB automatically whenever it has entries.
+5. Once you have a handful of fingerprints, run **`calibrate_path_loss`** to fit `tx_power_dbm` / `path_loss_n` to your building and set the fitted values in the component config — this directly improves the geometric (centroid / path-loss) estimate.
 
-Re-record an AP by running **`record_fingerprint`** again with the same name (replaces the row). Use **`--thorough-scan`** on the local wrapper, or set **`thorough_scan: true`** on the component, for steadier RSSI while calibrating.
+Re-record an AP by running **`record_fingerprint`** again with the same name (replaces the row). Use **`--scan-mode thorough`** on the local wrapper, or set **`scan_mode: "thorough"`** on the component, for steadier RSSI while calibrating.
 
 #### Commands
 
@@ -135,6 +136,7 @@ Every request must include a **`command`** string. All responses include **`ok`*
 | `list_fingerprints` | List all stored fingerprints |
 | `delete_fingerprint` | Remove one fingerprint by label |
 | `clear_fingerprints` | Remove all fingerprints |
+| `calibrate_path_loss` | Fit `tx_power_dbm` / `path_loss_n` from stored fingerprints |
 | `set_device_z_m` | Set device/antenna height in meters for subsequent `get_readings` |
 
 **`set_device_z_m`** — update antenna height without restarting the module:
@@ -192,6 +194,20 @@ Response: `{ "ok": true, "command": "set_device_z_m", "z_m": 1.2 }`.
 { "command": "clear_fingerprints" }
 ```
 
+**`calibrate_path_loss`** — fit the log-distance model to the fingerprint DB. Every stored fingerprint is an RSSI vector at a known position, so each (fingerprint, AP) pair gives one RSSI-at-known-distance observation; the command least-squares fits `rssi = tx_power_dbm - 10 * path_loss_n * log10(distance)` over all of them. No scan is performed.
+
+```json
+{ "command": "calibrate_path_loss" }
+```
+
+Add `"apply": true` to also use the fitted values immediately for subsequent `get_readings` (until restart — persist them as `tx_power_dbm` / `path_loss_n` component attributes to keep them):
+
+```json
+{ "command": "calibrate_path_loss", "apply": true }
+```
+
+Requires at least 4 (fingerprint, AP) samples with a ≥2x spread in distances — in practice, a few fingerprints recorded both near and far from APs. The more fingerprints (and the better spread across the floor), the better the fit.
+
 #### Example responses
 
 **`record_fingerprint`** / **`record_fingerprint_here`** on success:
@@ -233,6 +249,29 @@ Response: `{ "ok": true, "command": "set_device_z_m", "z_m": 1.2 }`.
 }
 ```
 
+**`calibrate_path_loss`**:
+
+```json
+{
+  "ok": true,
+  "command": "calibrate_path_loss",
+  "tx_power_dbm": -47.3,
+  "path_loss_n": 3.21,
+  "rmse_db": 5.4,
+  "sample_count": 38,
+  "fingerprint_count": 9,
+  "per_ap_residuals_db": [
+    { "ap_name": "WoLab", "mean_residual_db": -9.8, "sample_count": 6 },
+    { "ap_name": "SoA1", "mean_residual_db": 1.2, "sample_count": 8 }
+  ],
+  "current": { "tx_power_dbm": -40.0, "path_loss_n": 2.5, "rmse_db": 14.2 },
+  "applied": false,
+  "db_path": "/root/.viam/module-data/fingerprints.sqlite"
+}
+```
+
+`current.rmse_db` is how well your currently configured parameters explain the same data — if the fitted `rmse_db` is much lower, update your config. One AP with a large `mean_residual_db` while the rest sit near zero usually means that AP's configured coordinates (or BSSID) are wrong. A `warnings` array is included when the fit looks implausible (e.g. `path_loss_n` outside ~1.5–6).
+
 **`delete_fingerprint`**: `{ "ok": true, "command": "delete_fingerprint", "label": "…", "deleted": true }`  
 **`clear_fingerprints`**: `{ "ok": true, "command": "clear_fingerprints", "removed": 3, "db_path": "…" }`
 
@@ -256,13 +295,16 @@ The same commands are available from **`test_scan_rssi.py`** without the Viam ap
 
 ```bash
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
-  --record-fingerprint "Cafe, WoH1" --thorough-scan
+  --record-fingerprint "Cafe, WoH1" --scan-mode thorough
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
-  --record-fingerprint-here "Jane Smith's Desk" --at "12.0,5.5" --thorough-scan
+  --record-fingerprint-here "Jane Smith's Desk" --at "12.0,5.5" --scan-mode thorough
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --list-fingerprints
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --delete-fingerprint "Cafe, WoH1"
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --clear-fingerprints
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --set-device-z-m 1.2 --once
+python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --calibrate-path-loss
+# Calibrate and immediately position with the fitted values (one run):
+sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --apply-calibration --once
 ```
 
 `--record-fingerprint-here` mirrors the `record_fingerprint_here` do_command: any label string,
@@ -276,16 +318,15 @@ Component attributes that affect **`get_readings()`** (defaults shown):
 
 | Attribute | Default | Role |
 |-----------|---------|------|
-| `method` | `hybrid` | `hybrid`, `weighted_centroid`, `path_loss`, or `fingerprint` |
-| `fingerprint_max_blend` | `0.5` | Max fingerprint pull in hybrid mode (0–1) |
+| `fingerprint_max_blend` | `0.5` | Max fingerprint pull when blending (0 = geometry only, 1 = full pull at max confidence) |
 | `min_anchors` | `3` | Minimum APs after RSSI filtering |
 | `min_samples_per_ap` | auto | `2` when `scan_count >= 3`, else `1` |
-| `max_rssi_delta_db` | `35` | Drop anchors much weaker than strongest |
-| `min_rssi_dbm` | `-90` | Drop very weak anchors |
+| `max_rssi_delta_db` | `20` | Down-weight anchors much weaker than strongest (soft ramp, not a hard cutoff) |
+| `min_rssi_dbm` | `-82` | Drop very weak anchors (below ~-80 dBm RSSI has almost no ranging value) |
 | `weight_temperature` | `2.0` | Softens centroid RSSI weighting (see below) |
 | `smoothing_alpha` | `1.0` | Temporal smoothing (`1` = no lag) |
 | `max_position_step_m` | `0` | Cap movement per reading (`0` = off) |
-| `fast_scan` | `true` | Fast WiFi scan path (`thorough_scan: true` disables) |
+| `scan_mode` | `fast` | `fast`, `thorough` (slower, steadier RSSI — use when calibrating), or `blocking` |
 
 `weight_temperature` controls how sharply the weighted centroid favors the
 strongest AP. `1.0` weights by raw received power, so the result snaps to
@@ -295,7 +336,7 @@ contribute, trading a little responsiveness for a much steadier position. The
 default `2.0` is a good starting point; raise it if the position is still jumpy
 while stationary, lower it toward `1.0` if it feels sluggish to follow you.
 
-Other optional attributes: `interface`, `backend`, `scan_delay_s`, `blocking_scan`, `strict_mac`, `tx_power_dbm`, `path_loss_n`, `fingerprint_db_path`, `fingerprint_k`, `fingerprint_min_common_aps`, `fingerprint_min_common_fraction`, `fingerprint_max_rms_db`, `fingerprint_fallback`.
+Other optional attributes: `interface`, `backend`, `scan_delay_s`, `strict_mac`, `tx_power_dbm`, `path_loss_n`, `fingerprint_db_path`, `fingerprint_k`, `fingerprint_min_common_aps`, `fingerprint_min_common_fraction`, `fingerprint_max_rms_db`.
 
 ### Continuous background scanning (mobile robots)
 
@@ -492,38 +533,32 @@ sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --list-fingerprints
 ```
 
-Then localize ( **`hybrid` is the default** — blends centroid with fingerprints when the DB has entries):
+Then localize — fingerprints blend in automatically once the DB has entries (the `Method:` line shows `hybrid` when they contributed):
 
 ```bash
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --interval 2
 ```
 
-Pure fingerprint mode (snaps to calibrated points only):
+Tune the blend with `--fingerprint-max-blend` (0 = geometry only, 1 = full fingerprint pull at max confidence).
 
-```bash
-sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
-  --method fingerprint --interval 2
-```
+**Speed:** fingerprint blending does not add extra WiFi scans. With `--interval`, [background scanning](#continuous-background-scanning-mobile-robots) is on by default and each cycle is near-instant (it reads the rolling window). With `--no-background-scan` (or one-shot runs), each reading blocks on `scan_count` full scans (often **~2s each** on a Pi with `iw`, or longer if `iw` retries “device busy” then falls back to `wpa_cli`) — so `--scans 3` is often **~6–7s per cycle**, and `--interval 0.2` only sleeps 0.2s *after* that work finishes.
 
-Geometry only (no fingerprints): `--method weighted_centroid`. Tune blend with `--fingerprint-max-blend 0.5` (0 = centroid only, 1 = full fingerprint pull at max confidence).
-
-**Speed:** `hybrid` does not add extra WiFi scans. With `--interval`, [background scanning](#continuous-background-scanning-mobile-robots) is on by default and each cycle is near-instant (it reads the rolling window). With `--no-background-scan` (or one-shot runs), each reading blocks on `scan_count` full scans (often **~2s each** on a Pi with `iw`, or longer if `iw` retries “device busy” then falls back to `wpa_cli`) — so `--scans 3` is often **~6–7s per cycle**, and `--interval 0.2` only sleeps 0.2s *after* that work finishes.
-
-**Fast scanning is the default** (`wpa_cli` first, short poll waits). For maximum RSSI stability when recording fingerprints, use `--thorough-scan` (slower, ~6–7s with `--scans 3`).
+**`--scan-mode`** picks the scan strategy: `fast` (default; `wpa_cli` first, short poll waits), `thorough` (slower scans with delays between passes — use when recording fingerprints for maximum RSSI stability), or `blocking` (full blocking `iw` scan).
 
 ```bash
 sudo python3 test_scan_rssi.py --scans 2 --interval 0.5
-sudo python3 test_scan_rssi.py --record-fingerprint "Cafe, WoH1" --thorough-scan
+sudo python3 test_scan_rssi.py --record-fingerprint "Cafe, WoH1" --scan-mode thorough
 ```
 
-Output includes `Cycle time: …s` so you can see actual duration. On the robot: `"fast_scan": true` (default); set `"thorough_scan": true` to opt into the slow path.
+Output includes `Cycle time: …s` so you can see actual duration. On the robot the equivalent attribute is `"scan_mode"` (default `"fast"`).
 
-**Important:** AP-only fingerprints label each reading with the **nearest AP’s floor-plan
-coordinates** (discrete points). With fast `--interval`, the winning AP can change scan-to-scan
-and the position will jump. The output line `Fingerprint: <name>` shows which AP won; if you
-see `weighted_centroid fallback`, the match was rejected (loosen `--fingerprint-max-rms` or
+**Important:** AP-only fingerprints sit at the **AP's floor-plan coordinates** (discrete
+points). The output line `Fingerprint: <name>` shows the nearest match; if `Method:` stays
+`weighted_centroid`, the match was too poor to blend (loosen `--fingerprint-max-rms` or
 record more fingerprints). Matching uses **relative** RSSI (strongest AP = 0 dB) and requires
-several overlapping APs by default (`--fingerprint-min-common-aps 3`).
+several overlapping APs by default (`--fingerprint-min-common-aps 3`). A denser fingerprint
+grid (e.g. `--record-fingerprint-here` every few meters) makes matches both more confident
+and more precise.
 
 On the robot, set `"fingerprint_db_path"` to a persistent path. See [Methods → `do_command()`](#do_command-fingerprint-calibration) for calibration commands.
 

@@ -98,7 +98,6 @@ class RssiPositionSensor(Sensor, EasyResource):
     _scan_delay_s: float
     _blocking_scan: bool
     _strict_mac: bool
-    _method: str
     _min_anchors: int
     _max_rssi_delta_db: float | None
     _min_rssi_dbm: float
@@ -112,7 +111,6 @@ class RssiPositionSensor(Sensor, EasyResource):
     _fingerprint_min_common_fraction: float
     _fingerprint_max_rms_db: float | None
     _fingerprint_max_blend: float
-    _fingerprint_fallback: bool
     _fast_scan: bool
     _smoothing_alpha: float
     _max_position_step_m: float | None
@@ -149,29 +147,30 @@ class RssiPositionSensor(Sensor, EasyResource):
         sensor._scan_delay_s = (
             fields["scan_delay_s"].number_value if "scan_delay_s" in fields else 0.15
         )
-        sensor._blocking_scan = (
-            fields["blocking_scan"].bool_value if "blocking_scan" in fields else False
-        )
         sensor._strict_mac = (
             fields["strict_mac"].bool_value if "strict_mac" in fields else True
         )
-        sensor._method = (
-            fields["method"].string_value
-            if "method" in fields
-            else "hybrid"
+        scan_mode = (
+            fields["scan_mode"].string_value if "scan_mode" in fields else "fast"
         )
+        if scan_mode not in ("fast", "thorough", "blocking"):
+            raise ValueError(
+                f"scan_mode must be 'fast', 'thorough', or 'blocking', got {scan_mode!r}"
+            )
+        sensor._fast_scan = scan_mode == "fast"
+        sensor._blocking_scan = scan_mode == "blocking"
         sensor._min_anchors = (
             int(fields["min_anchors"].number_value) if "min_anchors" in fields else 3
         )
         sensor._max_rssi_delta_db = (
             fields["max_rssi_delta_db"].number_value
             if "max_rssi_delta_db" in fields
-            else 35.0
+            else 20.0
         )
         sensor._min_rssi_dbm = (
             fields["min_rssi_dbm"].number_value
             if "min_rssi_dbm" in fields
-            else -90.0
+            else -82.0
         )
         sensor._min_samples_per_ap = (
             int(fields["min_samples_per_ap"].number_value)
@@ -218,16 +217,6 @@ class RssiPositionSensor(Sensor, EasyResource):
             if "fingerprint_max_blend" in fields
             else 0.5
         )
-        sensor._fingerprint_fallback = (
-            fields["fingerprint_fallback"].bool_value
-            if "fingerprint_fallback" in fields
-            else True
-        )
-        sensor._fast_scan = (
-            fields["fast_scan"].bool_value if "fast_scan" in fields else True
-        )
-        if "thorough_scan" in fields and fields["thorough_scan"].bool_value:
-            sensor._fast_scan = False
         sensor._smoothing_alpha = (
             fields["smoothing_alpha"].number_value
             if "smoothing_alpha" in fields
@@ -473,28 +462,21 @@ class RssiPositionSensor(Sensor, EasyResource):
             strict_mac=self._strict_mac,
             min_sample_count=min_samples,
         )
-        fp_store = (
-            self._get_fingerprint_store()
-            if self._method in ("fingerprint", "hybrid")
-            else None
-        )
         position, method_used, fp_match = estimate_from_matched(
             self._config,
             matched,
-            method=self._method,
             min_anchors=self._min_anchors,
             max_rssi_delta_db=self._max_rssi_delta_db,
             min_rssi_dbm=self._min_rssi_dbm,
             tx_power_dbm=self._tx_power_dbm,
             path_loss_n=self._path_loss_n,
             weight_temperature=self._weight_temperature,
-            fingerprint_store=fp_store,
+            fingerprint_store=self._get_fingerprint_store(),
             fingerprint_k=self._fingerprint_k,
             fingerprint_min_common_aps=self._fingerprint_min_common_aps,
             fingerprint_min_common_fraction=self._fingerprint_min_common_fraction,
             fingerprint_max_rms_db=self._fingerprint_max_rms_db,
             fingerprint_max_blend=self._fingerprint_max_blend,
-            fingerprint_fallback=self._fingerprint_fallback,
             device_z_m=self._device_z_m,
         )
         return position, backend, aggregated, scans, method_used, fp_match
@@ -517,11 +499,6 @@ class RssiPositionSensor(Sensor, EasyResource):
                 fp_match,
             ) = await asyncio.to_thread(self._locate_from_buffer)
         else:
-            fp_store = (
-                self._get_fingerprint_store()
-                if self._method in ("fingerprint", "hybrid")
-                else None
-            )
             raw_xy, backend, readings, scans, method_used, fp_match = await asyncio.to_thread(
                 locate_position,
                 self._config,
@@ -531,7 +508,6 @@ class RssiPositionSensor(Sensor, EasyResource):
                 scan_delay_s=self._scan_delay_s,
                 blocking=self._blocking_scan,
                 strict_mac=self._strict_mac,
-                method=self._method,
                 min_anchors=self._min_anchors,
                 max_rssi_delta_db=self._max_rssi_delta_db,
                 min_rssi_dbm=self._min_rssi_dbm,
@@ -539,13 +515,12 @@ class RssiPositionSensor(Sensor, EasyResource):
                 tx_power_dbm=self._tx_power_dbm,
                 path_loss_n=self._path_loss_n,
                 weight_temperature=self._weight_temperature,
-                fingerprint_store=fp_store,
+                fingerprint_store=self._get_fingerprint_store(),
                 fingerprint_k=self._fingerprint_k,
                 fingerprint_min_common_aps=self._fingerprint_min_common_aps,
                 fingerprint_min_common_fraction=self._fingerprint_min_common_fraction,
                 fingerprint_max_rms_db=self._fingerprint_max_rms_db,
                 fingerprint_max_blend=self._fingerprint_max_blend,
-                fingerprint_fallback=self._fingerprint_fallback,
                 fast_scan=self._fast_scan,
             )
         raw_position = raw_xy
@@ -655,5 +630,21 @@ class RssiPositionSensor(Sensor, EasyResource):
             strict_mac=self._strict_mac,
             min_samples_per_ap=self._min_samples_per_ap,
             device_z_m=self._device_z_m,
+            fast_scan=self._fast_scan,
+            current_tx_power_dbm=self._tx_power_dbm,
+            current_path_loss_n=self._path_loss_n,
         )
+        if cmd.get("command") == "calibrate_path_loss" and result.get("ok"):
+            # Applied values live until restart; persist them in the component
+            # config (tx_power_dbm / path_loss_n) to make them permanent.
+            apply = bool(cmd.get("apply", False))
+            if apply:
+                self._tx_power_dbm = float(result["tx_power_dbm"])
+                self._path_loss_n = float(result["path_loss_n"])
+                self.logger.info(
+                    "applied calibrated path loss: tx_power_dbm=%.2f path_loss_n=%.3f",
+                    self._tx_power_dbm,
+                    self._path_loss_n,
+                )
+            result["applied"] = apply
         return result

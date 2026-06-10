@@ -61,29 +61,85 @@ def anchors_from_readings(
     return list(best.values())
 
 
+def delta_soft_weight(
+    delta_db: float,
+    max_delta_db: float,
+    *,
+    softness_db: float | None = None,
+) -> float:
+    """Smooth weight in [0, 1] for an anchor's dB gap below the strongest signal.
+
+    Full weight below ``max_delta_db - softness_db``; cosine ease to zero above
+    ``max_delta_db + softness_db``. Avoids the position cliffs caused by a hard
+    in/out cutoff when an AP hovers near ``max_rssi_delta_db``.
+    """
+    if max_delta_db <= 0:
+        return 0.0
+    if softness_db is None:
+        softness_db = max(6.0, 0.35 * max_delta_db)
+    low = max_delta_db - softness_db
+    high = max_delta_db + softness_db
+    if delta_db <= low:
+        return 1.0
+    if delta_db >= high:
+        return 0.0
+    t = (delta_db - low) / (high - low)
+    return 0.5 * (1.0 + math.cos(math.pi * t))
+
+
 def filter_anchors(
     anchors: list[Anchor],
     *,
-    max_delta_db: float | None = 30.0,
-    min_rssi_dbm: float = -90.0,
+    max_delta_db: float | None = 20.0,
+    min_rssi_dbm: float = -82.0,
 ) -> list[Anchor]:
     """
-    Drop weak/outlier anchors that add noise to the centroid.
+    Drop anchors below ``min_rssi_dbm``.
 
-    Keeps APs within `max_delta_db` of the strongest signal and above `min_rssi_dbm`.
-    Set max_delta_db to None to disable relative filtering.
+    Relative filtering vs the strongest AP is applied as a soft weight multiplier
+    (see ``combined_anchor_weights``) rather than a hard cutoff, so anchors near
+    ``max_delta_db`` fade out gradually instead of toggling the anchor set.
+
+    ``max_delta_db`` is accepted for API compatibility but does not remove
+    anchors; pass ``None`` to disable the soft relative weighting as well.
     """
+    del max_delta_db
+    return [a for a in anchors if a.rssi_dbm >= min_rssi_dbm]
+
+
+def combined_anchor_weights(
+    anchors: list[Anchor],
+    *,
+    weight_temperature: float = 2.0,
+    max_delta_db: float | None = 20.0,
+) -> list[float]:
+    """RSSI weights multiplied by soft relative-signal weights."""
     if not anchors:
         return []
+    rssi_weights = _weights_from_rssi(anchors, weight_temperature)
+    if max_delta_db is None:
+        return rssi_weights
     strongest = max(a.rssi_dbm for a in anchors)
-    kept: list[Anchor] = []
-    for a in anchors:
-        if a.rssi_dbm < min_rssi_dbm:
-            continue
-        if max_delta_db is not None and (strongest - a.rssi_dbm) > max_delta_db:
-            continue
-        kept.append(a)
-    return kept
+    return [
+        rw * delta_soft_weight(strongest - a.rssi_dbm, max_delta_db)
+        for a, rw in zip(anchors, rssi_weights)
+    ]
+
+
+def effective_anchors(
+    anchors: list[Anchor],
+    weights: list[float],
+    *,
+    min_fraction: float = 0.02,
+) -> list[Anchor]:
+    """Anchors whose combined weight is at least ``min_fraction`` of the peak."""
+    if not anchors or not weights:
+        return []
+    peak = max(weights)
+    if peak <= 0:
+        return []
+    threshold = peak * min_fraction
+    return [a for a, w in zip(anchors, weights) if w >= threshold]
 
 
 def distance_3d_m(
@@ -141,6 +197,7 @@ def refine_position_path_loss_3d(
     tx_power_dbm: float = -40.0,
     path_loss_n: float = 2.5,
     weight_temperature: float = 2.0,
+    weights: list[float] | None = None,
     max_iter: int = 80,
     learning_rate: float = 0.15,
 ) -> tuple[float, float]:
@@ -153,16 +210,16 @@ def refine_position_path_loss_3d(
     if len(anchors) < 2:
         return x, y
 
-    weights = _weights_from_rssi(anchors, weight_temperature)
+    if weights is None:
+        weights = _weights_from_rssi(anchors, weight_temperature)
     wsum = sum(weights)
     if wsum <= 0:
         return x, y
 
     for _ in range(max_iter):
         gx, gy = 0.0, 0.0
-        peak_w = max(weights)
         for a, w in zip(anchors, weights):
-            if w < peak_w * 0.05:
+            if w <= 0:
                 continue
             d_model = rssi_to_distance_m(
                 a.rssi_dbm, tx_power_dbm=tx_power_dbm, path_loss_n=path_loss_n
@@ -189,6 +246,7 @@ def estimate_weighted_centroid(
     tx_power_dbm: float = -40.0,
     path_loss_n: float = 2.5,
     refine_3d: bool = True,
+    weights: list[float] | None = None,
 ) -> PositionEstimate | None:
     if not anchors:
         return None
@@ -204,8 +262,11 @@ def estimate_weighted_centroid(
             residual_rmse_m=0.0,
         )
 
-    weights = _weights_from_rssi(anchors, weight_temperature)
+    if weights is None:
+        weights = _weights_from_rssi(anchors, weight_temperature)
     wsum = sum(weights)
+    if wsum <= 0:
+        return None
     x = sum(w * a.x_m for a, w in zip(anchors, weights)) / wsum
     y = sum(w * a.y_m for a, w in zip(anchors, weights)) / wsum
     method = "weighted_centroid"
@@ -230,7 +291,7 @@ def estimate_weighted_centroid(
                     device_z_m=device_z_m,
                     tx_power_dbm=tx_power_dbm,
                     path_loss_n=path_loss_n,
-                    weight_temperature=weight_temperature,
+                    weights=weights,
                     max_iter=40,
                 )
                 method = "weighted_centroid_3d"
@@ -242,20 +303,41 @@ def estimate_weighted_centroid(
                 device_z_m=device_z_m,
                 tx_power_dbm=tx_power_dbm,
                 path_loss_n=path_loss_n,
-                weight_temperature=weight_temperature,
+                weights=weights,
                 max_iter=40,
             )
             method = "weighted_centroid_3d"
     rmse = _weighted_rmse(anchors, x, y, weights, device_z_m=device_z_m)
+    used = effective_anchors(anchors, weights)
     return PositionEstimate(
         x_m=x,
         y_m=y,
         unit=unit,
         method=method,
-        anchor_count=len(anchors),
-        anchors_used=tuple(a.ap_name for a in anchors),
+        anchor_count=len(used),
+        anchors_used=tuple(a.ap_name for a in used),
         residual_rmse_m=rmse,
     )
+
+
+def clamp_to_bounds(
+    x: float,
+    y: float,
+    aps: list[Anchor] | tuple,
+    *,
+    margin_m: float,
+) -> tuple[float, float, bool]:
+    """Clamp (x, y) to the APs' bounding box expanded by ``margin_m``.
+
+    Path-loss refinement can extrapolate far outside the deployment when the
+    model and geometry disagree (e.g. miscalibrated tx_power / n); positions
+    far beyond every AP are never physically meaningful.
+    """
+    xs = [a.x_m for a in aps]
+    ys = [a.y_m for a in aps]
+    cx = min(max(x, min(xs) - margin_m), max(xs) + margin_m)
+    cy = min(max(y, min(ys) - margin_m), max(ys) + margin_m)
+    return cx, cy, (cx != x or cy != y)
 
 
 def estimate_path_loss_ls(
@@ -265,6 +347,8 @@ def estimate_path_loss_ls(
     device_z_m: float = 0.0,
     tx_power_dbm: float = -40.0,
     path_loss_n: float = 2.5,
+    weight_temperature: float = 2.0,
+    weights: list[float] | None = None,
     max_iter: int = 80,
     learning_rate: float = 0.15,
 ) -> PositionEstimate | None:
@@ -272,6 +356,8 @@ def estimate_path_loss_ls(
     Refine position by minimizing (3D distance - path-loss distance)^2.
     Starts from weighted centroid; requires calibration (tx_power, n).
     """
+    if weights is None:
+        weights = _weights_from_rssi(anchors, weight_temperature)
     seed = estimate_weighted_centroid(
         anchors,
         unit=unit,
@@ -279,6 +365,7 @@ def estimate_path_loss_ls(
         tx_power_dbm=tx_power_dbm,
         path_loss_n=path_loss_n,
         refine_3d=False,
+        weights=weights,
     )
     if seed is None:
         return None
@@ -292,9 +379,9 @@ def estimate_path_loss_ls(
         device_z_m=device_z_m,
         tx_power_dbm=tx_power_dbm,
         path_loss_n=path_loss_n,
+        weights=weights,
         max_iter=max_iter,
         learning_rate=learning_rate,
-        weight_temperature=2.0,
     )
     rmse = _path_loss_rmse(
         anchors,
@@ -324,33 +411,63 @@ def estimate_position(
     device_z_m: float = 0.0,
     tx_power_dbm: float = -40.0,
     path_loss_n: float = 2.5,
-    max_rssi_delta_db: float | None = 35.0,
-    min_rssi_dbm: float = -90.0,
+    max_rssi_delta_db: float | None = 20.0,
+    min_rssi_dbm: float = -82.0,
     weight_temperature: float = 2.0,
+    clamp_margin_m: float | None = 5.0,
 ) -> PositionEstimate | None:
     anchors = filter_anchors(
         anchors_from_readings(registry, readings),
-        max_delta_db=max_rssi_delta_db,
         min_rssi_dbm=min_rssi_dbm,
     )
-    if len(anchors) < min_anchors:
+    weights = combined_anchor_weights(
+        anchors,
+        weight_temperature=weight_temperature,
+        max_delta_db=max_rssi_delta_db,
+    )
+    if sum(1 for w in weights if w > 0) < min_anchors:
         return None
     unit = registry.unit
     if method == "path_loss":
-        return estimate_path_loss_ls(
+        estimate = estimate_path_loss_ls(
             anchors,
             unit=unit,
             device_z_m=device_z_m,
             tx_power_dbm=tx_power_dbm,
             path_loss_n=path_loss_n,
+            weight_temperature=weight_temperature,
+            weights=weights,
         )
-    return estimate_weighted_centroid(
-        anchors,
-        unit=unit,
-        weight_temperature=weight_temperature,
-        device_z_m=device_z_m,
-        tx_power_dbm=tx_power_dbm,
-        path_loss_n=path_loss_n,
+    else:
+        estimate = estimate_weighted_centroid(
+            anchors,
+            unit=unit,
+            weight_temperature=weight_temperature,
+            device_z_m=device_z_m,
+            tx_power_dbm=tx_power_dbm,
+            path_loss_n=path_loss_n,
+            weights=weights,
+        )
+    if estimate is None or clamp_margin_m is None:
+        return estimate
+    # Bound against all configured APs (not just heard anchors) so being near
+    # the floor edge by an unheard AP is not penalized.
+    x, y, clamped = clamp_to_bounds(
+        estimate.x_m,
+        estimate.y_m,
+        registry.access_points,
+        margin_m=clamp_margin_m,
+    )
+    if not clamped:
+        return estimate
+    return PositionEstimate(
+        x_m=x,
+        y_m=y,
+        unit=estimate.unit,
+        method=estimate.method + "_clamped",
+        anchor_count=estimate.anchor_count,
+        anchors_used=estimate.anchors_used,
+        residual_rmse_m=estimate.residual_rmse_m,
     )
 
 

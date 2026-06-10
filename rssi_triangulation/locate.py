@@ -13,6 +13,8 @@ from .fingerprint import FingerprintMatch, FingerprintStore, matched_to_rssi_dic
 from .triangulate import (
     PositionEstimate,
     anchors_from_readings,
+    combined_anchor_weights,
+    effective_anchors,
     estimate_position,
     filter_anchors,
 )
@@ -133,6 +135,25 @@ def apply_floor_origin(
         x_m=estimate.x_m - x_origin_m,
         y_m=estimate.y_m - y_origin_m,
     )
+
+
+def clamp_position_to_floor(
+    position: PositionReading,
+    config: LocatorConfig,
+) -> PositionReading:
+    """Clamp to the configured floor extents (reading frame, origin = corner).
+
+    Each axis is clamped to [0, width_m] / [0, height_m] only when that
+    dimension is configured; with neither set this is a no-op.
+    """
+    x, y = position.x_m, position.y_m
+    if config.width_m is not None:
+        x = min(max(x, 0.0), config.width_m)
+    if config.height_m is not None:
+        y = min(max(y, 0.0), config.height_m)
+    if x == position.x_m and y == position.y_m:
+        return position
+    return PositionReading(x_m=x, y_m=y, z_m=position.z_m)
 
 
 def smooth_position(
@@ -295,10 +316,9 @@ def locate_position(
     scan_delay_s: float = 0.15,
     blocking: bool = False,
     strict_mac: bool = True,
-    method: str = "hybrid",
     min_anchors: int = 3,
-    max_rssi_delta_db: float | None = 35.0,
-    min_rssi_dbm: float = -90.0,
+    max_rssi_delta_db: float | None = 20.0,
+    min_rssi_dbm: float = -82.0,
     min_samples_per_ap: int | None = None,
     tx_power_dbm: float = -40.0,
     path_loss_n: float = 2.5,
@@ -309,7 +329,6 @@ def locate_position(
     fingerprint_min_common_fraction: float = 0.5,
     fingerprint_max_rms_db: float | None = 10.0,
     fingerprint_max_blend: float = 0.5,
-    fingerprint_fallback: bool = True,
     fast_scan: bool = True,
     device_z_m: float | None = None,
 ) -> tuple[
@@ -338,7 +357,6 @@ def locate_position(
     position, method_used, fp_match = estimate_from_matched(
         config,
         matched,
-        method=method,
         min_anchors=min_anchors,
         max_rssi_delta_db=max_rssi_delta_db,
         min_rssi_dbm=min_rssi_dbm,
@@ -351,7 +369,6 @@ def locate_position(
         fingerprint_min_common_fraction=fingerprint_min_common_fraction,
         fingerprint_max_rms_db=fingerprint_max_rms_db,
         fingerprint_max_blend=fingerprint_max_blend,
-        fingerprint_fallback=fingerprint_fallback,
         device_z_m=device_z_m,
     )
     return position, backend, aggregated, scans_done, method_used, fp_match
@@ -361,10 +378,9 @@ def estimate_from_matched(
     config: LocatorConfig,
     matched: list[tuple[str, float, float | None]],
     *,
-    method: str = "hybrid",
     min_anchors: int = 3,
-    max_rssi_delta_db: float | None = 35.0,
-    min_rssi_dbm: float = -90.0,
+    max_rssi_delta_db: float | None = 20.0,
+    min_rssi_dbm: float = -82.0,
     tx_power_dbm: float = -40.0,
     path_loss_n: float = 2.5,
     weight_temperature: float = 2.0,
@@ -374,43 +390,35 @@ def estimate_from_matched(
     fingerprint_min_common_fraction: float = 0.5,
     fingerprint_max_rms_db: float | None = 10.0,
     fingerprint_max_blend: float = 0.5,
-    fingerprint_fallback: bool = True,
     device_z_m: float | None = None,
 ) -> tuple[PositionReading, str, FingerprintMatch | None]:
     """
     Estimate position from already-matched (ap_name, rssi, freq) readings.
 
-    Same method/fingerprint logic as ``locate_position`` but without scanning,
-    so it can run on readings collected by a background scanner.
+    There is one positioning behavior: a weighted centroid (with 3D path-loss
+    refinement), blended with a fingerprint match in proportion to its
+    confidence whenever the fingerprint store has entries. With an empty (or
+    absent) store this is a pure geometric estimate; when geometry fails but a
+    fingerprint matches, the fingerprint alone is used.
 
-    Returns (position, method_used, fingerprint_match_or_None).
+    Returns (position, method_used, fingerprint_match_or_None) where
+    ``method_used`` reports what actually happened: ``weighted_centroid``,
+    ``hybrid``, or ``fingerprint``.
     """
     registry = registry_from_config(config)
-    method_used = method
-    fp_match: FingerprintMatch | None = None
-    has_db = False
-    triangulation_method = (
-        "weighted_centroid" if method in ("fingerprint", "hybrid") else method
-    )
 
-    if method in ("fingerprint", "hybrid"):
-        has_db = fingerprint_store is not None and fingerprint_store.count() > 0
-        if not has_db:
-            if method == "hybrid" or fingerprint_fallback:
-                method_used = "weighted_centroid"
-            else:
-                raise RuntimeError(
-                    "fingerprint method requires a non-empty fingerprint database"
-                )
-        else:
-            fp_match = estimate_fingerprint_position(
-                fingerprint_store,
-                matched,
-                k=fingerprint_k,
-                min_common_aps=fingerprint_min_common_aps,
-                min_common_fraction=fingerprint_min_common_fraction,
-                max_rms_db=None if method == "hybrid" else fingerprint_max_rms_db,
-            )
+    fp_match: FingerprintMatch | None = None
+    if fingerprint_store is not None and fingerprint_store.count() > 0:
+        # No RMS gate here: confidence weighting in the blend handles poor
+        # matches (weight 0 past fingerprint_max_rms_db).
+        fp_match = estimate_fingerprint_position(
+            fingerprint_store,
+            matched,
+            k=fingerprint_k,
+            min_common_aps=fingerprint_min_common_aps,
+            min_common_fraction=fingerprint_min_common_fraction,
+            max_rms_db=None,
+        )
 
     effective_device_z = (
         config.device_z_m if device_z_m is None else device_z_m
@@ -418,7 +426,7 @@ def estimate_from_matched(
     estimate = estimate_position(
         registry,
         matched,
-        method=triangulation_method,
+        method="weighted_centroid",
         min_anchors=min_anchors,
         device_z_m=effective_device_z,
         tx_power_dbm=tx_power_dbm,
@@ -436,67 +444,66 @@ def estimate_from_matched(
             y_origin_m=config.y_origin_m,
         ).with_z(effective_device_z)
 
-    if method == "hybrid" and has_db:
-        if centroid_position is None and fp_match is None:
-            raise RuntimeError(
-                "hybrid method could not estimate: no centroid and no fingerprint match"
-            )
-        if centroid_position is None and fp_match is not None:
-            return (
+    # Fingerprints are matched without an RMS gate so the blend can weight
+    # them softly — but a fingerprint-only fallback returns the match as-is,
+    # so re-apply the gate here to avoid snapping to a garbage match.
+    fp_usable_alone = fp_match is not None and (
+        fingerprint_max_rms_db is None
+        or fp_match.distance_db <= fingerprint_max_rms_db
+    )
+    if centroid_position is None and fp_usable_alone:
+        assert fp_match is not None
+        return (
+            clamp_position_to_floor(
                 PositionReading(
                     x_m=fp_match.x_m,
                     y_m=fp_match.y_m,
                     z_m=fp_match.z_m,
                 ),
-                "fingerprint",
-                fp_match,
-            )
-        if centroid_position is not None and fp_match is not None:
-            blended, fp_match = blend_fingerprint_with_centroid(
-                centroid_position,
-                fp_match,
-                max_blend=fingerprint_max_blend,
-                max_rms_db=fingerprint_max_rms_db,
-                min_common_aps=fingerprint_min_common_aps,
-            )
-            return blended, "hybrid", fp_match
-        if centroid_position is not None:
-            return centroid_position, "weighted_centroid", None
-
-    if method == "fingerprint" and fp_match is not None:
-        return (
-            PositionReading(
-                x_m=fp_match.x_m,
-                y_m=fp_match.y_m,
-                z_m=fp_match.z_m,
+                config,
             ),
             "fingerprint",
             fp_match,
         )
-    if method == "fingerprint" and not fingerprint_fallback:
-        raise RuntimeError(
-            "no fingerprint match within max_rms_db / min_common_aps"
-        )
-    if method == "fingerprint":
-        method_used = "weighted_centroid"
 
-    if estimate is None:
-        usable = filter_anchors(
+    if centroid_position is None:
+        raw_anchors = filter_anchors(
             anchors_from_readings(registry, matched),
-            max_delta_db=max_rssi_delta_db,
             min_rssi_dbm=min_rssi_dbm,
         )
+        weights = combined_anchor_weights(
+            raw_anchors,
+            max_delta_db=max_rssi_delta_db,
+        )
+        usable = [a for a, w in zip(raw_anchors, weights) if w > 0]
         delta_desc = (
             "disabled"
             if max_rssi_delta_db is None
-            else f"{max_rssi_delta_db:g} dB below the strongest"
+            else f"{max_rssi_delta_db:g} dB below the strongest (soft weighting)"
+        )
+        fp_note = (
+            f" Best fingerprint {fp_match.label!r} was rejected "
+            f"(rms {fp_match.distance_db:.1f} dB > "
+            f"fingerprint_max_rms_db {fingerprint_max_rms_db:g})."
+            if fp_match is not None and fingerprint_max_rms_db is not None
+            else ""
         )
         raise RuntimeError(
             f"could not estimate position: matched {len(matched)} AP(s) by BSSID, "
-            f"but only {len(usable)} passed the RSSI filters "
+            f"but only {len(usable)} carried enough weight after RSSI filtering "
             f"(need ≥{min_anchors}). Most matched APs were weaker than "
             f"{min_rssi_dbm:g} dBm or more than {delta_desc}. Loosen min_rssi_dbm / "
-            f"max_rssi_delta_db, or move closer to more configured APs."
+            f"max_rssi_delta_db, or move closer to more configured APs." + fp_note
         )
-    assert centroid_position is not None
-    return centroid_position, method_used, fp_match
+
+    if fp_match is not None:
+        blended, fp_match = blend_fingerprint_with_centroid(
+            centroid_position,
+            fp_match,
+            max_blend=fingerprint_max_blend,
+            max_rms_db=fingerprint_max_rms_db,
+            min_common_aps=fingerprint_min_common_aps,
+        )
+        return clamp_position_to_floor(blended, config), "hybrid", fp_match
+
+    return clamp_position_to_floor(centroid_position, config), "weighted_centroid", None

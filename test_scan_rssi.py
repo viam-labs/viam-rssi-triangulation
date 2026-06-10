@@ -8,10 +8,9 @@ Local test wrapper for WiFi RSSI positioning (same logic as the Viam sensor).
 
 Fingerprint calibration (stand under each AP, or at any named spot):
 
-  sudo python3 test_scan_rssi.py --record-fingerprint "Cafe, WoH1"
+  sudo python3 test_scan_rssi.py --record-fingerprint "Cafe, WoH1" --scan-mode thorough
   sudo python3 test_scan_rssi.py --record-fingerprint-here "Jane Smith's Desk" --at "12.0,5.5"
   sudo python3 test_scan_rssi.py --list-fingerprints
-  sudo python3 test_scan_rssi.py --method fingerprint --interval 2
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from time import monotonic
 from dataclasses import asdict
 from pathlib import Path
 
+from rssi_triangulation.calibrate import calibrate_from_fingerprints
 from rssi_triangulation.fingerprint import FingerprintStore
 from rssi_triangulation.fingerprint_commands import (
     default_fingerprint_db_path,
@@ -54,7 +54,11 @@ _SCANNER: BackgroundScanner | None = None
 
 
 def effective_fast_scan(args: argparse.Namespace) -> bool:
-    return not args.thorough_scan
+    return args.scan_mode == "fast"
+
+
+def effective_blocking(args: argparse.Namespace) -> bool:
+    return args.scan_mode == "blocking"
 
 
 def effective_scan_delay(args: argparse.Namespace) -> float:
@@ -189,7 +193,16 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
     db = fingerprint_db(args)
     device_z_m = effective_device_z_m(config)
 
-    if args.clear_fingerprints:
+    if args.calibrate_path_loss:
+        result = execute_fingerprint_command(
+            {"command": "calibrate_path_loss"},
+            config=config,
+            db=db,
+            device_z_m=device_z_m,
+            current_tx_power_dbm=args.tx_power,
+            current_path_loss_n=args.path_loss_n,
+        )
+    elif args.clear_fingerprints:
         result = execute_fingerprint_command(
             {"command": "clear_fingerprints"},
             config=config,
@@ -197,10 +210,11 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
             interface=args.interface,
             backend=args.backend,
             scan_delay_s=effective_scan_delay(args),
-            blocking=args.blocking_scan,
+            blocking=effective_blocking(args),
             strict_mac=args.strict_mac,
             min_samples_per_ap=args.min_samples_per_ap,
             device_z_m=device_z_m,
+            fast_scan=effective_fast_scan(args),
         )
     elif args.list_fingerprints:
         result = execute_fingerprint_command(
@@ -210,10 +224,11 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
             interface=args.interface,
             backend=args.backend,
             scan_delay_s=effective_scan_delay(args),
-            blocking=args.blocking_scan,
+            blocking=effective_blocking(args),
             strict_mac=args.strict_mac,
             min_samples_per_ap=args.min_samples_per_ap,
             device_z_m=device_z_m,
+            fast_scan=effective_fast_scan(args),
         )
     elif args.delete_fingerprint:
         result = execute_fingerprint_command(
@@ -226,10 +241,11 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
             interface=args.interface,
             backend=args.backend,
             scan_delay_s=effective_scan_delay(args),
-            blocking=args.blocking_scan,
+            blocking=effective_blocking(args),
             strict_mac=args.strict_mac,
             min_samples_per_ap=args.min_samples_per_ap,
             device_z_m=device_z_m,
+            fast_scan=effective_fast_scan(args),
         )
     elif args.record_fingerprint:
         result = execute_fingerprint_command(
@@ -242,11 +258,12 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
             interface=args.interface,
             backend=args.backend,
             scan_delay_s=effective_scan_delay(args),
-            blocking=args.blocking_scan,
+            blocking=effective_blocking(args),
             strict_mac=args.strict_mac,
             min_samples_per_ap=args.min_samples_per_ap,
             scan_count_override=args.scans,
             device_z_m=device_z_m,
+            fast_scan=effective_fast_scan(args),
         )
     elif args.record_fingerprint_here:
         x_m, y_m, z_m = parse_at_coordinates(args.at)
@@ -265,11 +282,12 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
             interface=args.interface,
             backend=args.backend,
             scan_delay_s=effective_scan_delay(args),
-            blocking=args.blocking_scan,
+            blocking=effective_blocking(args),
             strict_mac=args.strict_mac,
             min_samples_per_ap=args.min_samples_per_ap,
             scan_count_override=args.scans,
             device_z_m=device_z_m,
+            fast_scan=effective_fast_scan(args),
         )
     else:
         return 1
@@ -305,7 +323,6 @@ def locate_via_scanner(
     position, method_used, fp_match = estimate_from_matched(
         config,
         matched,
-        method=args.method,
         min_anchors=args.min_aps,
         max_rssi_delta_db=None if args.no_rssi_filter else args.max_rssi_delta,
         min_rssi_dbm=args.min_rssi,
@@ -320,7 +337,6 @@ def locate_via_scanner(
             None if args.no_fingerprint_max_rms else args.fingerprint_max_rms
         ),
         fingerprint_max_blend=args.fingerprint_max_blend,
-        fingerprint_fallback=not args.no_fingerprint_fallback,
         device_z_m=effective_device_z_m(config),
     )
     return position, backend, aggregated, scans, method_used, fp_match
@@ -330,9 +346,7 @@ def run_once(args: argparse.Namespace) -> int:
     global _LAST_POSITION, _DEVICE_Z_M
     t0 = monotonic()
     config = effective_config(args)
-    fp_store = (
-        fingerprint_db(args) if args.method in ("fingerprint", "hybrid") else None
-    )
+    fp_store = fingerprint_db(args)
 
     if _SCANNER is not None:
         raw_position, backend, readings, scans_done, method_used, fp_match = (
@@ -345,9 +359,8 @@ def run_once(args: argparse.Namespace) -> int:
             interface=args.interface,
             backend=args.backend,
             scan_delay_s=effective_scan_delay(args),
-            blocking=args.blocking_scan,
+            blocking=effective_blocking(args),
             strict_mac=args.strict_mac,
-            method=args.method,
             min_anchors=args.min_aps,
             max_rssi_delta_db=None if args.no_rssi_filter else args.max_rssi_delta,
             min_rssi_dbm=args.min_rssi,
@@ -363,7 +376,6 @@ def run_once(args: argparse.Namespace) -> int:
                 None if args.no_fingerprint_max_rms else args.fingerprint_max_rms
             ),
             fingerprint_max_blend=args.fingerprint_max_blend,
-            fingerprint_fallback=not args.no_fingerprint_fallback,
             fast_scan=effective_fast_scan(args),
         )
     elapsed_s = monotonic() - t0
@@ -431,11 +443,6 @@ def run_once(args: argparse.Namespace) -> int:
                 elapsed_s=elapsed_s,
             )
         )
-        if method_used != args.method and args.method in ("fingerprint", "hybrid"):
-            print(
-                f"  (requested {args.method}; used {method_used})",
-                file=sys.stderr,
-            )
     return 0
 
 
@@ -464,11 +471,15 @@ def main() -> int:
     )
     parser.add_argument("--scan-delay", type=float, default=None, metavar="SEC")
     parser.add_argument(
-        "--thorough-scan",
-        action="store_true",
-        help="Slower scans: iw long poll, nmcli fallback, delay between passes (max RSSI stability)",
+        "--scan-mode",
+        choices=["fast", "thorough", "blocking"],
+        default="fast",
+        help=(
+            "fast (default): quick wpa_cli/iw polls; thorough: slower scans with "
+            "delays between passes (max RSSI stability, good for fingerprint "
+            "recording); blocking: full blocking iw scan"
+        ),
     )
-    parser.add_argument("--blocking-scan", action="store_true")
     parser.add_argument(
         "--background-scan",
         action=argparse.BooleanOptionalAction,
@@ -511,18 +522,9 @@ def main() -> int:
     )
     parser.add_argument("--strict-mac", action="store_true", default=True)
     parser.add_argument("--no-strict-mac", action="store_false", dest="strict_mac")
-    parser.add_argument("--max-rssi-delta", type=float, default=35.0, metavar="DB")
-    parser.add_argument("--min-rssi", type=float, default=-90.0, metavar="DBM")
+    parser.add_argument("--max-rssi-delta", type=float, default=20.0, metavar="DB")
+    parser.add_argument("--min-rssi", type=float, default=-82.0, metavar="DBM")
     parser.add_argument("--no-rssi-filter", action="store_true")
-    parser.add_argument(
-        "--method",
-        choices=["weighted_centroid", "path_loss", "fingerprint", "hybrid"],
-        default="hybrid",
-        help=(
-            "hybrid (default) blends weighted centroid with fingerprints; "
-            "weighted_centroid = geometry only"
-        ),
-    )
     parser.add_argument("--min-aps", type=int, default=3, metavar="N")
     parser.add_argument(
         "--min-samples-per-ap",
@@ -601,6 +603,23 @@ def main() -> int:
         help="Delete all fingerprints and exit",
     )
     fp.add_argument(
+        "--calibrate-path-loss",
+        action="store_true",
+        help=(
+            "Fit tx_power_dbm / path_loss_n from stored fingerprints and exit "
+            "(no scan; set the fitted values in your config)"
+        ),
+    )
+    fp.add_argument(
+        "--apply-calibration",
+        action="store_true",
+        help=(
+            "Fit path loss from stored fingerprints and use the fitted "
+            "tx_power_dbm / path_loss_n for this run's positioning "
+            "(overrides --tx-power / --path-loss-n)"
+        ),
+    )
+    fp.add_argument(
         "--set-device-z-m",
         type=float,
         metavar="M",
@@ -638,12 +657,7 @@ def main() -> int:
         type=float,
         default=0.5,
         metavar="W",
-        help="For --method hybrid: max fingerprint weight 0–1 (default: 0.5)",
-    )
-    fp.add_argument(
-        "--no-fingerprint-fallback",
-        action="store_true",
-        help="With --method fingerprint, do not fall back to weighted centroid",
+        help="Max fingerprint weight 0–1 when blending with the centroid (default: 0.5; 0 = geometry only)",
     )
     args = parser.parse_args()
 
@@ -673,6 +687,7 @@ def main() -> int:
         or args.list_fingerprints
         or args.delete_fingerprint
         or args.clear_fingerprints
+        or args.calibrate_path_loss
     )
     if fp_actions:
         try:
@@ -680,6 +695,29 @@ def main() -> int:
         except (RuntimeError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+
+    if args.apply_calibration:
+        try:
+            fit = calibrate_from_fingerprints(
+                effective_config(args),
+                fingerprint_db(args),
+                current_tx_power_dbm=args.tx_power,
+                current_path_loss_n=args.path_loss_n,
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(f"calibration error: {exc}", file=sys.stderr)
+            return 1
+        args.tx_power = float(fit["tx_power_dbm"])
+        args.path_loss_n = float(fit["path_loss_n"])
+        print(
+            f"Applied calibrated path loss: tx_power_dbm={args.tx_power:.2f} "
+            f"path_loss_n={args.path_loss_n:.3f} "
+            f"(rmse {fit['rmse_db']:.1f} dB over {fit['sample_count']} samples, "
+            f"was {fit['current']['rmse_db']:.1f} dB with previous values)",
+            file=sys.stderr,
+        )
+        for warning in fit.get("warnings", []):
+            print(f"  warning: {warning}", file=sys.stderr)
 
     continuous = args.interval > 0 and not args.once
     # Auto-enable for continuous runs (the moving-robot case); one-shot runs
@@ -696,7 +734,7 @@ def main() -> int:
             network=config.scan_ssid,
             backend=args.backend,
             fast=effective_fast_scan(args),
-            blocking=args.blocking_scan,
+            blocking=effective_blocking(args),
             interval_s=args.background_scan_interval,
             window_s=args.rssi_window,
             half_life_s=args.rssi_half_life,
@@ -719,8 +757,8 @@ def main() -> int:
         )
         print(
             f"Scanning every {args.interval}s after each cycle completes ({args.config})\n"
-            f"  method={args.method} scans={args.scans or 'from config'} "
-            f"fast_scan={effective_fast_scan(args)} fingerprints={db_path}\n"
+            f"  scan_mode={args.scan_mode} scans={args.scans or 'from config'} "
+            f"fingerprints={db_path}\n"
             f"{cycle_note}"
             f"  Ctrl+C to stop\n"
         )

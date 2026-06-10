@@ -29,6 +29,10 @@ class LocatorConfig:
     device_z_m: float
     access_point_z_m: float
     access_points: tuple[ConfiguredAccessPoint, ...]
+    # Optional floor extents in the reading frame (origin = corner of the
+    # floor). When set, positions are clamped to [0, width] / [0, height].
+    width_m: float | None = None
+    height_m: float | None = None
 
 
 def _float_field(fields: Mapping[str, Any], key: str, *, default: float | None = None) -> float:
@@ -119,6 +123,12 @@ def parse_config_dict(raw: dict[str, Any]) -> LocatorConfig:
     y_origin_m = float(floor.get("y_origin_m", 0.0))
     device_z_m = _config_float(raw, floor, "device_z_m", default=0.0)
     access_point_z_m = _config_float(raw, floor, "access_point_z_m", default=0.0)
+    width_m = float(floor["width_m"]) if "width_m" in floor else None
+    height_m = float(floor["height_m"]) if "height_m" in floor else None
+    if width_m is not None and width_m <= 0:
+        raise ValueError("floor_plan.width_m must be > 0")
+    if height_m is not None and height_m <= 0:
+        raise ValueError("floor_plan.height_m must be > 0")
 
     aps = tuple(
         _parse_access_point_item(ap, default_z_m=access_point_z_m)
@@ -135,6 +145,8 @@ def parse_config_dict(raw: dict[str, Any]) -> LocatorConfig:
         device_z_m=device_z_m,
         access_point_z_m=access_point_z_m,
         access_points=aps,
+        width_m=width_m,
+        height_m=height_m,
     )
 
 

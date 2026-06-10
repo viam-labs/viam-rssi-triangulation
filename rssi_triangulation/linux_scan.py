@@ -112,7 +112,7 @@ def parse_iw_scan(output: str) -> list[WifiReading]:
 
 
 def scan_iw_blocking(interface: str) -> list[WifiReading]:
-    """Blocking `iw scan` (slow; use only with --blocking-scan)."""
+    """Blocking `iw scan` (slow; used by scan_mode=blocking)."""
     if not shutil.which("iw"):
         raise RuntimeError("iw not found on PATH")
     proc = _run(["iw", "dev", interface, "scan"], timeout=45.0)

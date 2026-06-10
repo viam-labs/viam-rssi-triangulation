@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
+from .calibrate import calibrate_from_fingerprints
 from .fingerprint import FingerprintStore, matched_to_rssi_dict
 from .locate import collect_matched_scan
 from .module_config import LocatorConfig
@@ -43,6 +44,9 @@ def execute_fingerprint_command(
     min_samples_per_ap: int | None = None,
     scan_count_override: int | None = None,
     device_z_m: float | None = None,
+    fast_scan: bool = True,
+    current_tx_power_dbm: float | None = None,
+    current_path_loss_n: float | None = None,
 ) -> dict[str, Any]:
     """
     Run a fingerprint calibration command.
@@ -54,6 +58,8 @@ def execute_fingerprint_command(
       list_fingerprints — { "command": "list_fingerprints" }
       delete_fingerprint — { "command": "delete_fingerprint", "label": "..." }
       clear_fingerprints — { "command": "clear_fingerprints" }
+      calibrate_path_loss — { "command": "calibrate_path_loss" } fits
+          tx_power_dbm / path_loss_n from stored fingerprints
     """
     name = command.get("command")
     if not isinstance(name, str) or not name:
@@ -91,6 +97,16 @@ def execute_fingerprint_command(
         removed = db.clear()
         return {"ok": True, "command": name, "removed": removed, "db_path": str(db.path)}
 
+    if name == "calibrate_path_loss":
+        result = calibrate_from_fingerprints(
+            config,
+            db,
+            current_tx_power_dbm=current_tx_power_dbm,
+            current_path_loss_n=current_path_loss_n,
+        )
+        result["command"] = name
+        return result
+
     if name in ("record_fingerprint", "record_fingerprint_here"):
         return _record_fingerprint(
             name,
@@ -105,11 +121,13 @@ def execute_fingerprint_command(
             min_samples_per_ap=min_samples_per_ap,
             scan_count_override=scan_count_override,
             device_z_m=device_z_m,
+            fast_scan=fast_scan,
         )
 
     raise ValueError(
         f"unknown fingerprint command {name!r}; supported: record_fingerprint, "
-        "record_fingerprint_here, list_fingerprints, delete_fingerprint, clear_fingerprints"
+        "record_fingerprint_here, list_fingerprints, delete_fingerprint, "
+        "clear_fingerprints, calibrate_path_loss"
     )
 
 
@@ -127,6 +145,7 @@ def _record_fingerprint(
     min_samples_per_ap: int | None,
     scan_count_override: int | None,
     device_z_m: float | None,
+    fast_scan: bool,
 ) -> dict[str, Any]:
     effective_device_z = (
         config.device_z_m if device_z_m is None else device_z_m
@@ -166,6 +185,7 @@ def _record_fingerprint(
         strict_mac=strict_mac,
         min_samples_per_ap=min_samples_per_ap,
         scan_count_override=scan_count,
+        fast_scan=fast_scan,
     )
     rssi_by_ap = matched_to_rssi_dict(matched)
     record = db.record(

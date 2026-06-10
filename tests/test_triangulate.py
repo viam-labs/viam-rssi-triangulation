@@ -8,7 +8,10 @@ from rssi_triangulation.registry import AccessPoint, ApRegistry
 from rssi_triangulation.triangulate import (
     Anchor,
     anchors_from_readings,
+    combined_anchor_weights,
+    delta_soft_weight,
     distance_3d_m,
+    effective_anchors,
     estimate_position,
     estimate_weighted_centroid,
     filter_anchors,
@@ -92,14 +95,35 @@ def test_weight_temperature_preserves_symmetry(triangle_registry: ApRegistry) ->
     assert est.y_m == pytest.approx(0.0, abs=0.01)
 
 
-def test_filter_anchors_drops_weak_outliers() -> None:
+def test_filter_anchors_drops_below_min_rssi() -> None:
     anchors = [
         Anchor("a", 0, 0, -50),
         Anchor("b", 10, 0, -85),
     ]
-    kept = filter_anchors(anchors, max_delta_db=30.0)
+    kept = filter_anchors(anchors, min_rssi_dbm=-82.0)
     assert len(kept) == 1
     assert kept[0].ap_name == "a"
+
+
+def test_delta_soft_weight_avoids_hard_cliff() -> None:
+    assert delta_soft_weight(13.0, 20.0) == pytest.approx(1.0, abs=0.01)
+    assert delta_soft_weight(19.0, 20.0) == pytest.approx(0.611, abs=0.02)
+    assert delta_soft_weight(20.0, 20.0) == pytest.approx(0.5, abs=0.02)
+    assert delta_soft_weight(21.0, 20.0) == pytest.approx(0.389, abs=0.02)
+    assert delta_soft_weight(19.0, 20.0) > delta_soft_weight(21.0, 20.0)
+    assert delta_soft_weight(27.5, 20.0) == pytest.approx(0.0, abs=0.01)
+
+
+def test_soft_delta_keeps_anchor_in_set_near_threshold() -> None:
+    anchors = [
+        Anchor("strong", 0, 0, -61.5),
+        Anchor("mid", 10, 0, -69.5),
+        Anchor("edge", 20, 0, -81.5),
+    ]
+    weights = combined_anchor_weights(anchors, max_delta_db=20.0)
+    assert len(filter_anchors(anchors)) == 3
+    assert len(effective_anchors(anchors, weights)) == 3
+    assert weights[-1] > 0.0
 
 
 def test_estimate_position_insufficient_anchors(triangle_registry: ApRegistry) -> None:
