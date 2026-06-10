@@ -21,6 +21,8 @@ class FingerprintRecord:
     rssi_by_ap: dict[str, float]
     recorded_at: str
     scan_count: int
+    positioned: bool = True
+    distances_by_ap: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,8 @@ class FingerprintMatch:
     k: int
     neighbors: tuple[str, ...]
     blend_weight: float = 0.0
+    positioned: bool = True
+    position_method: str | None = None
 
 
 def matched_to_rssi_dict(
@@ -153,37 +157,68 @@ class FingerprintStore:
                     conn.execute(
                         "ALTER TABLE fingerprints ADD COLUMN z_m REAL NOT NULL DEFAULT 0"
                     )
+                cols = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(fingerprints)")
+                }
+                if "positioned" not in cols:
+                    conn.execute(
+                        "ALTER TABLE fingerprints ADD COLUMN positioned INTEGER NOT NULL DEFAULT 1"
+                    )
+                if "distances_json" not in cols:
+                    conn.execute(
+                        "ALTER TABLE fingerprints ADD COLUMN distances_json TEXT"
+                    )
                 conn.commit()
 
     def record(
         self,
         label: str,
         *,
-        x_m: float,
-        y_m: float,
+        x_m: float = 0.0,
+        y_m: float = 0.0,
         z_m: float = 0.0,
         rssi_by_ap: dict[str, float],
         scan_count: int,
+        positioned: bool = True,
+        distances_by_ap: dict[str, float] | None = None,
     ) -> FingerprintRecord:
         if not rssi_by_ap:
             raise ValueError("fingerprint has no AP RSSI readings")
+        distances = dict(distances_by_ap or {})
         payload = json.dumps(rssi_by_ap, sort_keys=True)
+        distances_payload = json.dumps(distances, sort_keys=True) if distances else None
         recorded_at = datetime.now(timezone.utc).isoformat()
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
                     """
-                    INSERT INTO fingerprints (label, x_m, y_m, z_m, rssi_json, recorded_at, scan_count)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO fingerprints (
+                        label, x_m, y_m, z_m, rssi_json, recorded_at, scan_count,
+                        positioned, distances_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(label) DO UPDATE SET
                         x_m = excluded.x_m,
                         y_m = excluded.y_m,
                         z_m = excluded.z_m,
                         rssi_json = excluded.rssi_json,
                         recorded_at = excluded.recorded_at,
-                        scan_count = excluded.scan_count
+                        scan_count = excluded.scan_count,
+                        positioned = excluded.positioned,
+                        distances_json = excluded.distances_json
                     """,
-                    (label, x_m, y_m, z_m, payload, recorded_at, scan_count),
+                    (
+                        label,
+                        x_m,
+                        y_m,
+                        z_m,
+                        payload,
+                        recorded_at,
+                        scan_count,
+                        1 if positioned else 0,
+                        distances_payload,
+                    ),
                 )
                 row_id = conn.execute(
                     "SELECT id FROM fingerprints WHERE label = ?", (label,)
@@ -199,6 +234,8 @@ class FingerprintStore:
             rssi_by_ap=rssi_by_ap,
             recorded_at=recorded_at,
             scan_count=scan_count,
+            positioned=positioned,
+            distances_by_ap=distances or None,
         )
 
     def list_all(self) -> list[FingerprintRecord]:
@@ -208,7 +245,8 @@ class FingerprintStore:
                 return list(self._cache)
             with self._connect() as conn:
                 rows = conn.execute(
-                    "SELECT id, label, x_m, y_m, z_m, rssi_json, recorded_at, scan_count "
+                    "SELECT id, label, x_m, y_m, z_m, rssi_json, recorded_at, scan_count, "
+                    "positioned, distances_json "
                     "FROM fingerprints ORDER BY label"
                 ).fetchall()
             self._cache = [_row_to_record(row) for row in rows]
@@ -244,18 +282,19 @@ class FingerprintStore:
             self._invalidate_cache()
             return removed
 
-    def match(
+    def rank_matches(
         self,
         rssi_by_ap: dict[str, float],
         *,
-        k: int = 1,
+        k: int = 5,
         min_common_aps: int = 3,
         min_common_fraction: float = 0.5,
-        max_rms_db: float | None = 10.0,
+        max_rms_db: float | None = None,
         normalize: bool = True,
-    ) -> FingerprintMatch | None:
+    ) -> list[tuple[float, int, FingerprintRecord]]:
+        """Return up to ``k`` stored fingerprints sorted by RSSI similarity (lower RMS first)."""
         if not rssi_by_ap:
-            return None
+            return []
         k = max(1, k)
         candidates: list[tuple[float, int, FingerprintRecord]] = []
         for fp in self.list_all():
@@ -272,17 +311,45 @@ class FingerprintStore:
                 continue
             candidates.append((dist, common, fp))
 
-        if not candidates:
+        candidates.sort(key=lambda t: t[0])
+        return candidates[:k]
+
+    def match(
+        self,
+        rssi_by_ap: dict[str, float],
+        *,
+        k: int = 1,
+        min_common_aps: int = 3,
+        min_common_fraction: float = 0.5,
+        max_rms_db: float | None = 10.0,
+        normalize: bool = True,
+    ) -> FingerprintMatch | None:
+        if not rssi_by_ap:
+            return None
+        k = max(1, k)
+        top = self.rank_matches(
+            rssi_by_ap,
+            k=k,
+            min_common_aps=min_common_aps,
+            min_common_fraction=min_common_fraction,
+            max_rms_db=max_rms_db,
+            normalize=normalize,
+        )
+        if not top:
             return None
 
-        candidates.sort(key=lambda t: t[0])
-        top = candidates[:k]
-        weights = [1.0 / (d + 0.1) for d, _, _ in top]
-        wsum = sum(weights)
-        x = sum(w * fp.x_m for (_, _, fp), w in zip(top, weights)) / wsum
-        y = sum(w * fp.y_m for (_, _, fp), w in zip(top, weights)) / wsum
-        z = sum(w * fp.z_m for (_, _, fp), w in zip(top, weights)) / wsum
         best_dist, best_common, best_fp = top[0]
+        positioned_top = [entry for entry in top if entry[2].positioned]
+        if positioned_top:
+            weights = [1.0 / (d + 0.1) for d, _, _ in positioned_top]
+            wsum = sum(weights)
+            x = sum(w * fp.x_m for (_, _, fp), w in zip(positioned_top, weights)) / wsum
+            y = sum(w * fp.y_m for (_, _, fp), w in zip(positioned_top, weights)) / wsum
+            z = sum(w * fp.z_m for (_, _, fp), w in zip(positioned_top, weights)) / wsum
+            has_position = True
+        else:
+            x = y = z = 0.0
+            has_position = False
         return FingerprintMatch(
             x_m=x,
             y_m=y,
@@ -292,12 +359,20 @@ class FingerprintStore:
             common_aps=best_common,
             k=len(top),
             neighbors=tuple(fp.label for _, _, fp in top),
+            positioned=has_position,
         )
 
 
 def _row_to_record(row: sqlite3.Row) -> FingerprintRecord:
     keys = row.keys()
     z_m = float(row["z_m"]) if "z_m" in keys else 0.0
+    positioned = bool(row["positioned"]) if "positioned" in keys else True
+    distances_raw = row["distances_json"] if "distances_json" in keys else None
+    distances_by_ap = (
+        {str(k): float(v) for k, v in json.loads(distances_raw).items()}
+        if distances_raw
+        else None
+    )
     return FingerprintRecord(
         id=int(row["id"]),
         label=str(row["label"]),
@@ -307,4 +382,6 @@ def _row_to_record(row: sqlite3.Row) -> FingerprintRecord:
         rssi_by_ap=json.loads(row["rssi_json"]),
         recorded_at=str(row["recorded_at"]),
         scan_count=int(row["scan_count"]),
+        positioned=positioned,
+        distances_by_ap=distances_by_ap,
     )

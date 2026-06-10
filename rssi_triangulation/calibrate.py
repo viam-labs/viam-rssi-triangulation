@@ -67,16 +67,21 @@ def samples_from_fingerprints(
     }
     samples: list[PathLossSample] = []
     for record in records:
+        distances = record.distances_by_ap or {}
         for ap_name, rssi in record.rssi_by_ap.items():
-            pos = ap_positions.get(ap_name)
-            if pos is None:
-                continue
-            distance = math.sqrt(
-                (record.x_m - pos[0]) ** 2
-                + (record.y_m - pos[1]) ** 2
-                + (record.z_m - pos[2]) ** 2
-            )
-            if distance < min_distance_m:
+            distance: float | None = None
+            if ap_name in distances:
+                distance = distances[ap_name]
+            elif record.positioned:
+                pos = ap_positions.get(ap_name)
+                if pos is None:
+                    continue
+                distance = math.sqrt(
+                    (record.x_m - pos[0]) ** 2
+                    + (record.y_m - pos[1]) ** 2
+                    + (record.z_m - pos[2]) ** 2
+                )
+            if distance is None or distance < min_distance_m:
                 continue
             samples.append(
                 PathLossSample(

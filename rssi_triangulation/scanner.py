@@ -210,6 +210,19 @@ class BackgroundScanner:
         """Block until the first scan pass lands (or timeout). True if data."""
         return self._first_scan.wait(timeout=timeout_s)
 
+    def wait_for_samples(self, timeout_s: float = 8.0) -> bool:
+        """Block until the buffer has readings to aggregate, or timeout."""
+        deadline = time.monotonic() + max(timeout_s, 0.1)
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            self._first_scan.wait(timeout=min(0.25, remaining))
+            aggregated, _ = self.buffer.snapshot(half_life_s=self.half_life_s)
+            if aggregated:
+                return True
+            time.sleep(0.1)
+        aggregated, _ = self.buffer.snapshot(half_life_s=self.half_life_s)
+        return bool(aggregated)
+
     def snapshot(self) -> tuple[list[AggregatedWifiReading], str, int]:
         """(aggregated_readings, backend_name, scan_passes_in_window)."""
         aggregated, scans = self.buffer.snapshot(half_life_s=self.half_life_s)
@@ -226,6 +239,13 @@ class BackgroundScanner:
                     fast=self._fast,
                 )
                 self._backend_used = backend
+                if not readings:
+                    target = self._network or "any SSID"
+                    self._last_error = (
+                        f"{backend} scan returned no BSSIDs for {target!r}"
+                    )
+                    self._stop.wait(max(self.interval_s, 1.0))
+                    continue
                 self._last_error = None
                 self.buffer.add_batch(readings)
                 self._first_scan.set()

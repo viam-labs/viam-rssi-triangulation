@@ -80,6 +80,26 @@ def test_fit_warnings_on_implausible_values() -> None:
     assert any("path_loss_n" in w for w in warnings)
 
 
+def test_samples_from_fingerprints_prefers_measured_distance(locator_config) -> None:
+    from rssi_triangulation.fingerprint import FingerprintRecord
+
+    record = FingerprintRecord(
+        id=1,
+        label="desk",
+        x_m=2.0,
+        y_m=2.0,
+        z_m=0.0,
+        rssi_by_ap={"AP-A": -60.0},
+        recorded_at="now",
+        scan_count=1,
+        positioned=False,
+        distances_by_ap={"AP-A": 8.3},
+    )
+    samples = samples_from_fingerprints(locator_config, [record])
+    assert len(samples) == 1
+    assert samples[0].distance_m == pytest.approx(8.3)
+
+
 def test_samples_from_fingerprints_uses_reading_frame(locator_config) -> None:
     db_records = []
     from rssi_triangulation.fingerprint import FingerprintRecord

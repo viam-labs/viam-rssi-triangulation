@@ -34,6 +34,7 @@ from rssi_triangulation.locate import (
     PositionReading,
     build_readings_dict,
     estimate_from_matched,
+    fingerprint_rankings_from_matched,
     locate_position,
     match_readings_to_aps,
     smooth_position,
@@ -499,14 +500,16 @@ class RssiPositionSensor(Sensor, EasyResource):
         """
         scanner = self._scanner
         assert scanner is not None
-        scanner.wait_for_data(timeout_s=5.0)
-        aggregated, backend, scans = scanner.snapshot()
-        if not aggregated:
+        if not scanner.wait_for_samples(timeout_s=10.0):
             err = scanner.last_error
+            ssid = self._config.scan_ssid
             raise RuntimeError(
                 "background scanner has no recent WiFi samples"
                 + (f" (last scan error: {err})" if err else "")
+                + f". No BSSIDs heard on SSID {ssid!r} — confirm the client radio "
+                "supports scanning that band (6 GHz needs WiFi 6E)."
             )
+        aggregated, backend, scans = scanner.snapshot()
         min_samples = self._min_samples_per_ap
         if min_samples is None:
             min_samples = 2 if scans >= 3 else 1
@@ -653,7 +656,34 @@ class RssiPositionSensor(Sensor, EasyResource):
             len(readings),
             scans,
         )
-        return build_readings_dict(position, matched, self._config)
+        fp_store = self._get_fingerprint_store()
+        rankings = (
+            fingerprint_rankings_from_matched(
+                fp_store,
+                matched,
+                k=max(5, self._fingerprint_k),
+                min_common_aps=self._fingerprint_min_common_aps,
+                min_common_fraction=self._fingerprint_min_common_fraction,
+                config=self._config,
+                device_z_m=self._device_z_m,
+                min_anchors=self._min_anchors,
+                max_rssi_delta_db=self._max_rssi_delta_db,
+                min_rssi_dbm=self._min_rssi_dbm,
+                tx_power_dbm=self._tx_power_dbm,
+                path_loss_n=self._path_loss_n,
+                weight_temperature=self._weight_temperature,
+            )
+            if fp_store.count() > 0
+            else None
+        )
+        return build_readings_dict(
+            position,
+            matched,
+            self._config,
+            method=method_used,
+            fp_match=fp_match,
+            fingerprint_rankings=rankings,
+        )
 
     async def do_command(
         self,

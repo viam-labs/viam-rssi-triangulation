@@ -74,9 +74,25 @@ Scans WiFi, estimates position, and returns coordinates in the configured floor-
       "bssid": "be:9c:6c:2e:de:2c",
       "rssi": -67.0
     }
+  ],
+  "method": "hybrid",
+  "nearest_fingerprint": "Matt Desk",
+  "fingerprint_match": {
+    "label": "Matt Desk",
+    "distance_db": 4.2,
+    "common_aps": 6,
+    "neighbors": ["Matt Desk"],
+    "blend_weight": 0.35,
+    "positioned": false
+  },
+  "fingerprint_rankings": [
+    { "label": "Matt Desk", "distance_db": 4.2, "common_aps": 6, "positioned": false },
+    { "label": "Lobby", "distance_db": 11.8, "common_aps": 5, "positioned": true }
   ]
 }
 ```
+
+When a fingerprint DB is configured, **`nearest_fingerprint`** is the best RSSI match (lowest `distance_db` RMS). **`fingerprint_rankings`** lists the top matches. RSSI-only fingerprints (`positioned: false`) participate in matching but do not pull `(x, y)` unless they have floor coordinates.
 
 `location.z` is the device/antenna height above the floor (from `device_z_m` in config, or updated at runtime via **`set_device_z_m`**). Positioning uses **3D slant range** when AP and device heights differ: standing under a ceiling AP no longer looks meters away in x/y just because the radio is 2.5 m above you. `access_points` lists configured APs heard on this scan, **strongest RSSI first**. Each `x` / `y` / `z` is the offset from your estimated position to that AP (AP position minus current position), in meters — not absolute floor coordinates.
 
@@ -133,10 +149,12 @@ Every request must include a **`command`** string. All responses include **`ok`*
 |-----------|---------|
 | `record_fingerprint` | Scan WiFi and store a fingerprint at a configured AP’s floor-plan position |
 | `record_fingerprint_here` | Scan and store at explicit coordinates (same frame as `get_readings`) |
+| `record_fingerprint_rssi` | Scan and store RSSI only (no floor x/y); optional measured distance(s) to AP(s) for calibration |
 | `list_fingerprints` | List all stored fingerprints |
 | `delete_fingerprint` | Remove one fingerprint by label |
 | `clear_fingerprints` | Remove all fingerprints |
 | `calibrate_path_loss` | Fit `tx_power_dbm` / `path_loss_n` from stored fingerprints |
+| `match_fingerprints` | Scan WiFi and return the nearest stored fingerprint(s) by RSSI similarity |
 | `set_device_z_m` | Set device/antenna height in meters for subsequent `get_readings` |
 
 **`set_device_z_m`** — update antenna height without restarting the module:
@@ -160,6 +178,32 @@ Response: `{ "ok": true, "command": "set_device_z_m", "z_m": 1.2 }`.
 ```
 
 `ap_name` must match `access_points[].name` exactly. Optional: **`scan_count`** (overrides component `scan_count` for this scan only).
+
+**`record_fingerprint_rssi`** — RSSI at a named spot without floor-plan coordinates. Optional laser/rangefinder distances improve path-loss calibration and, with a single range, enable approximate x/y blending at runtime via the geometry prior.
+
+```json
+{
+  "command": "record_fingerprint_rssi",
+  "label": "Matt Desk",
+  "distances_m": { "SoA1": 8.3, "NoE4": 12.1 }
+}
+```
+
+Or:
+
+```json
+{
+  "command": "record_fingerprint_rssi",
+  "label": "Matt Desk",
+  "distance_to_ap": [
+    { "ap_name": "SoA1", "distance_m": 8.3 }
+  ]
+}
+```
+
+Each `distance_to_ap` / `distances_m` entry must name a configured AP that was **heard in the same scan**. Distances are **3D slant ranges from the antenna** (`device_z_m` to `access_point_z_m`), not horizontal map distance.
+
+A **single** range does not fix bearing (only a circle around the AP). At runtime the matcher projects that circle in the direction of the live WiFi geometry estimate, then blends toward that point (`position_method: range_prior`). Blend strength rises with RSSI match quality — a tight desk match (low RMS) pulls almost as hard as a surveyed coordinate; a loose match stays cautious. **Two or more** ranges can infer `(x, y)` via trilateration when circles intersect; otherwise the same single-range projection applies per AP. Stored coordinates from a laser survey are still preferred when you have them.
 
 **`record_fingerprint_here`** — for grid points between APs:
 
@@ -192,6 +236,12 @@ Response: `{ "ok": true, "command": "set_device_z_m", "z_m": 1.2 }`.
 
 ```json
 { "command": "clear_fingerprints" }
+```
+
+**`match_fingerprints`** — scan WiFi and rank stored fingerprints by RSSI similarity (lower `distance_db` = closer match). Optional **`k`** (default 5) controls how many rankings are returned. Works with RSSI-only desk fingerprints (no floor x/y).
+
+```json
+{ "command": "match_fingerprints", "k": 5 }
 ```
 
 **`calibrate_path_loss`** — fit the log-distance model to the fingerprint DB. Every stored fingerprint is an RSSI vector at a known position, so each (fingerprint, AP) pair gives one RSSI-at-known-distance observation; the command least-squares fits `rssi = tx_power_dbm - 10 * path_loss_n * log10(distance)` over all of them. No scan is performed.
@@ -298,6 +348,8 @@ sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
   --record-fingerprint "Cafe, WoH1" --scan-mode thorough
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
   --record-fingerprint-here "Jane Smith's Desk" --at "12.0,5.5" --scan-mode thorough
+sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
+  --scan-mode thorough --record-fingerprint-rssi "Matt Desk" --distance-to-ap "SoA1:8.3"
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --list-fingerprints
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --delete-fingerprint "Cafe, WoH1"
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --clear-fingerprints
@@ -305,6 +357,8 @@ sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --se
 python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --calibrate-path-loss
 # Positioning auto-calibrates from fingerprints by default (first reading, then hourly):
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --once
+# nearest_fingerprint and fingerprint_rankings appear in --json output
+sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --json --once
 # Disable: --no-auto-calibrate-path-loss. Tune interval: --path-loss-calibration-interval 600
 ```
 

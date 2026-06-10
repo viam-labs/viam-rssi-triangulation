@@ -10,6 +10,7 @@ Fingerprint calibration (stand under each AP, or at any named spot):
 
   sudo python3 test_scan_rssi.py --record-fingerprint "Cafe, WoH1" --scan-mode thorough
   sudo python3 test_scan_rssi.py --record-fingerprint-here "Jane Smith's Desk" --at "12.0,5.5"
+  sudo python3 test_scan_rssi.py --record-fingerprint-rssi "Matt Desk" --distance-to-ap "SoA1:8.3"
   sudo python3 test_scan_rssi.py --list-fingerprints
 """
 
@@ -37,6 +38,8 @@ from rssi_triangulation.locate import (
     PositionReading,
     build_readings_dict,
     estimate_from_matched,
+    fingerprint_match_as_dict,
+    fingerprint_rankings_from_matched,
     locate_position,
     match_readings_to_aps,
     smooth_position,
@@ -234,6 +237,20 @@ def parse_at_coordinates(value: str) -> tuple[float, float, float | None]:
     return x_m, y_m, z_m
 
 
+def parse_distance_to_ap(value: str) -> tuple[str, float]:
+    """Parse AP:distance_m or AP=distance_m (meters)."""
+    for sep in (":", "="):
+        if sep in value:
+            ap_name, raw = value.split(sep, 1)
+            ap_name = ap_name.strip()
+            if not ap_name:
+                raise ValueError(f"empty AP name in --distance-to-ap {value!r}")
+            return ap_name, float(raw.strip())
+    raise ValueError(
+        f'--distance-to-ap must look like "SoA1:8.3" or "SoA1=8.3", got {value!r}'
+    )
+
+
 def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
     config = effective_config(args)
     db = fingerprint_db(args)
@@ -311,6 +328,32 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
             device_z_m=device_z_m,
             fast_scan=effective_fast_scan(args),
         )
+    elif args.record_fingerprint_rssi:
+        command = {
+            "command": "record_fingerprint_rssi",
+            "label": args.record_fingerprint_rssi,
+        }
+        if args.distance_to_ap:
+            command["distance_to_ap"] = [
+                {"ap_name": ap_name, "distance_m": distance_m}
+                for ap_name, distance_m in (
+                    parse_distance_to_ap(item) for item in args.distance_to_ap
+                )
+            ]
+        result = execute_fingerprint_command(
+            command,
+            config=config,
+            db=db,
+            interface=args.interface,
+            backend=args.backend,
+            scan_delay_s=effective_scan_delay(args),
+            blocking=effective_blocking(args),
+            strict_mac=args.strict_mac,
+            min_samples_per_ap=args.min_samples_per_ap,
+            scan_count_override=args.scans,
+            device_z_m=device_z_m,
+            fast_scan=effective_fast_scan(args),
+        )
     elif args.record_fingerprint_here:
         x_m, y_m, z_m = parse_at_coordinates(args.at)
         command: dict = {
@@ -352,14 +395,17 @@ def locate_via_scanner(
 ):
     """Estimate from the background scanner buffer (same tuple as locate_position)."""
     assert _SCANNER is not None
-    _SCANNER.wait_for_data(timeout_s=6.0)
-    aggregated, backend, scans = _SCANNER.snapshot()
-    if not aggregated:
+    if not _SCANNER.wait_for_samples(timeout_s=10.0):
         err = _SCANNER.last_error
+        ssid = config.scan_ssid
         raise RuntimeError(
             "background scanner has no recent WiFi samples"
             + (f" (last scan error: {err})" if err else "")
+            + f". No BSSIDs heard on SSID {ssid!r} — confirm the interface can scan "
+            "that band (6 GHz needs WiFi 6E), try --no-background-scan, or check "
+            f"scan_ssid in {args.config}."
         )
+    aggregated, backend, scans = _SCANNER.snapshot()
     matched = match_readings_to_aps(
         aggregated,
         registry_from_config(config),
@@ -439,7 +485,33 @@ def run_once(args: argparse.Namespace) -> int:
         strict_mac=args.strict_mac,
         min_sample_count=effective_min_samples_per_ap(args, scans_done),
     )
-    payload = build_readings_dict(position, matched, config)
+    rankings = (
+        fingerprint_rankings_from_matched(
+            fp_store,
+            matched,
+            k=max(5, args.fingerprint_k),
+            min_common_aps=args.fingerprint_min_common_aps,
+            min_common_fraction=args.fingerprint_min_common_fraction,
+            config=config,
+            device_z_m=effective_device_z_m(config),
+            min_anchors=args.min_aps,
+            max_rssi_delta_db=None if args.no_rssi_filter else args.max_rssi_delta,
+            min_rssi_dbm=args.min_rssi,
+            tx_power_dbm=args.tx_power,
+            path_loss_n=args.path_loss_n,
+            weight_temperature=args.weight_temperature,
+        )
+        if fp_store.count() > 0
+        else None
+    )
+    payload = build_readings_dict(
+        position,
+        matched,
+        config,
+        method=method_used,
+        fp_match=fp_match,
+        fingerprint_rankings=rankings,
+    )
     raw_payload = build_readings_dict(raw_position, matched, config)
 
     if args.json:
@@ -447,17 +519,9 @@ def run_once(args: argparse.Namespace) -> int:
             "config": str(args.config),
             "backend": backend,
             "method": method_used,
-            "fingerprint_match": (
-                {
-                    "label": fp_match.label,
-                    "distance_db": fp_match.distance_db,
-                    "common_aps": fp_match.common_aps,
-                    "neighbors": list(fp_match.neighbors),
-                    "blend_weight": fp_match.blend_weight,
-                }
-                if fp_match is not None
-                else None
-            ),
+            "nearest_fingerprint": fp_match.label if fp_match is not None else None,
+            "fingerprint_match": fingerprint_match_as_dict(fp_match),
+            "fingerprint_rankings": rankings,
             "scans": scans_done,
             "fingerprint_db": str(fp_store.path) if fp_store else None,
             "fingerprint_count": fp_store.count() if fp_store else None,
@@ -626,6 +690,23 @@ def main() -> int:
         ),
     )
     fp.add_argument(
+        "--record-fingerprint-rssi",
+        metavar="LABEL",
+        help=(
+            "Record an RSSI-only fingerprint (no floor x/y), then exit. "
+            "Use --distance-to-ap for optional laser/measured ranges."
+        ),
+    )
+    fp.add_argument(
+        "--distance-to-ap",
+        action="append",
+        metavar="AP:M",
+        help=(
+            'Line-of-sight distance in meters to an AP, e.g. "SoA1:8.3". '
+            "Repeat with --record-fingerprint-rssi."
+        ),
+    )
+    fp.add_argument(
         "--at",
         metavar="X,Y[,Z]",
         help=(
@@ -744,9 +825,13 @@ def main() -> int:
     if args.set_device_z_m is not None:
         _DEVICE_Z_M = float(args.set_device_z_m)
 
+    if args.distance_to_ap and not args.record_fingerprint_rssi:
+        parser.error("--distance-to-ap only applies to --record-fingerprint-rssi")
+
     fp_actions = (
         args.record_fingerprint
         or args.record_fingerprint_here
+        or args.record_fingerprint_rssi
         or args.list_fingerprints
         or args.delete_fingerprint
         or args.clear_fingerprints

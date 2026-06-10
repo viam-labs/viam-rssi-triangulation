@@ -93,6 +93,27 @@ def test_background_scanner_collects_and_stops(monkeypatch) -> None:
     assert calls
 
 
+def test_background_scanner_waits_until_nonempty_samples(monkeypatch) -> None:
+    state = {"n": 0}
+
+    def empty_then_data(**kwargs):
+        state["n"] += 1
+        if state["n"] < 2:
+            return [], "fake"
+        return [_reading(rssi=-57.0)], "fake"
+
+    monkeypatch.setattr("rssi_triangulation.scanner.scan_wifi", empty_then_data)
+    scanner = BackgroundScanner(network="Net", interval_s=0.05, window_s=5.0)
+    scanner.start()
+    try:
+        assert scanner.wait_for_samples(timeout_s=3.0)
+        aggregated, _, _ = scanner.snapshot()
+        assert aggregated
+        assert scanner.last_error is None
+    finally:
+        scanner.stop()
+
+
 def test_background_scanner_survives_scan_errors(monkeypatch) -> None:
     state = {"n": 0}
 

@@ -384,7 +384,16 @@ def scan_wifi(
 
     for name, fn in backends:
         try:
-            readings = _filter_by_ssid(fn(iface), network)
+            raw = fn(iface)
+            readings = _filter_by_ssid(raw, network)
+            if network and not readings:
+                if raw:
+                    errors.append(
+                        f"{name}: found {len(raw)} BSSIDs but none on SSID {network!r}"
+                    )
+                else:
+                    errors.append(f"{name}: scan returned no BSSIDs")
+                continue
             if backend and name != backend:
                 print(
                     f"note: --backend {backend} unavailable, used {name} instead",

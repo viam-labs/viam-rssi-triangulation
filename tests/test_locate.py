@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from rssi_triangulation.aggregate import AggregatedWifiReading
@@ -34,6 +36,7 @@ def test_access_points_relative_to_position(sample_config_dict: dict) -> None:
     # AP-B at (9, -2) in reading frame → offset (8, -4) from (1, 2)
     assert aps[0]["x"] == pytest.approx(8.0)
     assert aps[0]["y"] == pytest.approx(-4.0)
+    assert aps[0]["range_m"] == pytest.approx(math.hypot(8.0, 4.0), abs=0.01)
     assert aps[0]["unit"] == "meters"
 
 
