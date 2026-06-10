@@ -325,7 +325,6 @@ def locate_position(
 
     Returns (position, backend_name, aggregated_scan_readings, scans_completed, method_used).
     """
-    registry = registry_from_config(config)
     matched, backend, aggregated, scans_done = collect_matched_scan(
         config,
         interface=interface,
@@ -336,7 +335,57 @@ def locate_position(
         min_samples_per_ap=min_samples_per_ap,
         fast_scan=fast_scan,
     )
+    position, method_used, fp_match = estimate_from_matched(
+        config,
+        matched,
+        method=method,
+        min_anchors=min_anchors,
+        max_rssi_delta_db=max_rssi_delta_db,
+        min_rssi_dbm=min_rssi_dbm,
+        tx_power_dbm=tx_power_dbm,
+        path_loss_n=path_loss_n,
+        weight_temperature=weight_temperature,
+        fingerprint_store=fingerprint_store,
+        fingerprint_k=fingerprint_k,
+        fingerprint_min_common_aps=fingerprint_min_common_aps,
+        fingerprint_min_common_fraction=fingerprint_min_common_fraction,
+        fingerprint_max_rms_db=fingerprint_max_rms_db,
+        fingerprint_max_blend=fingerprint_max_blend,
+        fingerprint_fallback=fingerprint_fallback,
+        device_z_m=device_z_m,
+    )
+    return position, backend, aggregated, scans_done, method_used, fp_match
 
+
+def estimate_from_matched(
+    config: LocatorConfig,
+    matched: list[tuple[str, float, float | None]],
+    *,
+    method: str = "hybrid",
+    min_anchors: int = 3,
+    max_rssi_delta_db: float | None = 35.0,
+    min_rssi_dbm: float = -90.0,
+    tx_power_dbm: float = -40.0,
+    path_loss_n: float = 2.5,
+    weight_temperature: float = 2.0,
+    fingerprint_store: FingerprintStore | None = None,
+    fingerprint_k: int = 1,
+    fingerprint_min_common_aps: int = 3,
+    fingerprint_min_common_fraction: float = 0.5,
+    fingerprint_max_rms_db: float | None = 10.0,
+    fingerprint_max_blend: float = 0.5,
+    fingerprint_fallback: bool = True,
+    device_z_m: float | None = None,
+) -> tuple[PositionReading, str, FingerprintMatch | None]:
+    """
+    Estimate position from already-matched (ap_name, rssi, freq) readings.
+
+    Same method/fingerprint logic as ``locate_position`` but without scanning,
+    so it can run on readings collected by a background scanner.
+
+    Returns (position, method_used, fingerprint_match_or_None).
+    """
+    registry = registry_from_config(config)
     method_used = method
     fp_match: FingerprintMatch | None = None
     has_db = False
@@ -399,9 +448,6 @@ def locate_position(
                     y_m=fp_match.y_m,
                     z_m=fp_match.z_m,
                 ),
-                backend,
-                aggregated,
-                scans_done,
                 "fingerprint",
                 fp_match,
             )
@@ -413,16 +459,9 @@ def locate_position(
                 max_rms_db=fingerprint_max_rms_db,
                 min_common_aps=fingerprint_min_common_aps,
             )
-            return blended, backend, aggregated, scans_done, "hybrid", fp_match
+            return blended, "hybrid", fp_match
         if centroid_position is not None:
-            return (
-                centroid_position,
-                backend,
-                aggregated,
-                scans_done,
-                "weighted_centroid",
-                None,
-            )
+            return centroid_position, "weighted_centroid", None
 
     if method == "fingerprint" and fp_match is not None:
         return (
@@ -431,9 +470,6 @@ def locate_position(
                 y_m=fp_match.y_m,
                 z_m=fp_match.z_m,
             ),
-            backend,
-            aggregated,
-            scans_done,
             "fingerprint",
             fp_match,
         )
@@ -463,4 +499,4 @@ def locate_position(
             f"max_rssi_delta_db, or move closer to more configured APs."
         )
     assert centroid_position is not None
-    return centroid_position, backend, aggregated, scans_done, method_used, fp_match
+    return centroid_position, method_used, fp_match

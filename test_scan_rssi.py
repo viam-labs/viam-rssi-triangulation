@@ -6,9 +6,10 @@ Local test wrapper for WiFi RSSI positioning (same logic as the Viam sensor).
   sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --json
   sudo python3 test_scan_rssi.py --json --debug   # include all BSSIDs heard on SSID
 
-Fingerprint calibration (stand under each AP):
+Fingerprint calibration (stand under each AP, or at any named spot):
 
   sudo python3 test_scan_rssi.py --record-fingerprint "Cafe, WoH1"
+  sudo python3 test_scan_rssi.py --record-fingerprint-here "Jane Smith's Desk" --at "12.0,5.5"
   sudo python3 test_scan_rssi.py --list-fingerprints
   sudo python3 test_scan_rssi.py --method fingerprint --interval 2
 """
@@ -32,6 +33,7 @@ from rssi_triangulation.fingerprint import FingerprintMatch
 from rssi_triangulation.locate import (
     PositionReading,
     build_readings_dict,
+    estimate_from_matched,
     locate_position,
     match_readings_to_aps,
     smooth_position,
@@ -41,12 +43,14 @@ from rssi_triangulation.module_config import (
     load_config_file,
     registry_from_config,
 )
+from rssi_triangulation.scanner import BackgroundScanner
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "examples" / "module_config_viam-5g.json"
 _LAST_POSITION: PositionReading | None = None
 _DEVICE_Z_M: float | None = None
 _FP_STORE: FingerprintStore | None = None
 _FP_STORE_PATH: Path | None = None
+_SCANNER: BackgroundScanner | None = None
 
 
 def effective_fast_scan(args: argparse.Namespace) -> bool:
@@ -162,6 +166,24 @@ def format_report(
     return "\n".join(lines)
 
 
+def parse_at_coordinates(value: str) -> tuple[float, float, float | None]:
+    """Parse --at "X,Y" or "X,Y,Z" (meters, floor-plan frame)."""
+    parts = [p.strip() for p in value.split(",")]
+    if len(parts) not in (2, 3):
+        raise ValueError(
+            f'--at must be "X,Y" or "X,Y,Z" in meters, got {value!r}'
+        )
+    try:
+        x_m = float(parts[0])
+        y_m = float(parts[1])
+        z_m = float(parts[2]) if len(parts) == 3 else None
+    except ValueError as exc:
+        raise ValueError(
+            f'--at must contain numbers, e.g. "12.0,5.5", got {value!r}'
+        ) from exc
+    return x_m, y_m, z_m
+
+
 def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
     config = effective_config(args)
     db = fingerprint_db(args)
@@ -226,6 +248,29 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
             scan_count_override=args.scans,
             device_z_m=device_z_m,
         )
+    elif args.record_fingerprint_here:
+        x_m, y_m, z_m = parse_at_coordinates(args.at)
+        command: dict = {
+            "command": "record_fingerprint_here",
+            "label": args.record_fingerprint_here,
+            "x_m": x_m,
+            "y_m": y_m,
+        }
+        if z_m is not None:
+            command["z_m"] = z_m
+        result = execute_fingerprint_command(
+            command,
+            config=config,
+            db=db,
+            interface=args.interface,
+            backend=args.backend,
+            scan_delay_s=effective_scan_delay(args),
+            blocking=args.blocking_scan,
+            strict_mac=args.strict_mac,
+            min_samples_per_ap=args.min_samples_per_ap,
+            scan_count_override=args.scans,
+            device_z_m=device_z_m,
+        )
     else:
         return 1
 
@@ -236,27 +281,34 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
     return 0 if result.get("ok") else 1
 
 
-def run_once(args: argparse.Namespace) -> int:
-    global _LAST_POSITION, _DEVICE_Z_M
-    t0 = monotonic()
-    config = effective_config(args)
-    fp_store = (
-        fingerprint_db(args) if args.method in ("fingerprint", "hybrid") else None
-    )
-
-    raw_position, backend, readings, scans_done, method_used, fp_match = locate_position(
-        config,
-        device_z_m=effective_device_z_m(config),
-        interface=args.interface,
-        backend=args.backend,
-        scan_delay_s=effective_scan_delay(args),
-        blocking=args.blocking_scan,
+def locate_via_scanner(
+    args: argparse.Namespace,
+    config: LocatorConfig,
+    fp_store: FingerprintStore | None,
+):
+    """Estimate from the background scanner buffer (same tuple as locate_position)."""
+    assert _SCANNER is not None
+    _SCANNER.wait_for_data(timeout_s=6.0)
+    aggregated, backend, scans = _SCANNER.snapshot()
+    if not aggregated:
+        err = _SCANNER.last_error
+        raise RuntimeError(
+            "background scanner has no recent WiFi samples"
+            + (f" (last scan error: {err})" if err else "")
+        )
+    matched = match_readings_to_aps(
+        aggregated,
+        registry_from_config(config),
         strict_mac=args.strict_mac,
+        min_sample_count=effective_min_samples_per_ap(args, scans),
+    )
+    position, method_used, fp_match = estimate_from_matched(
+        config,
+        matched,
         method=args.method,
         min_anchors=args.min_aps,
         max_rssi_delta_db=None if args.no_rssi_filter else args.max_rssi_delta,
         min_rssi_dbm=args.min_rssi,
-        min_samples_per_ap=args.min_samples_per_ap,
         tx_power_dbm=args.tx_power,
         path_loss_n=args.path_loss_n,
         weight_temperature=args.weight_temperature,
@@ -269,8 +321,51 @@ def run_once(args: argparse.Namespace) -> int:
         ),
         fingerprint_max_blend=args.fingerprint_max_blend,
         fingerprint_fallback=not args.no_fingerprint_fallback,
-        fast_scan=effective_fast_scan(args),
+        device_z_m=effective_device_z_m(config),
     )
+    return position, backend, aggregated, scans, method_used, fp_match
+
+
+def run_once(args: argparse.Namespace) -> int:
+    global _LAST_POSITION, _DEVICE_Z_M
+    t0 = monotonic()
+    config = effective_config(args)
+    fp_store = (
+        fingerprint_db(args) if args.method in ("fingerprint", "hybrid") else None
+    )
+
+    if _SCANNER is not None:
+        raw_position, backend, readings, scans_done, method_used, fp_match = (
+            locate_via_scanner(args, config, fp_store)
+        )
+    else:
+        raw_position, backend, readings, scans_done, method_used, fp_match = locate_position(
+            config,
+            device_z_m=effective_device_z_m(config),
+            interface=args.interface,
+            backend=args.backend,
+            scan_delay_s=effective_scan_delay(args),
+            blocking=args.blocking_scan,
+            strict_mac=args.strict_mac,
+            method=args.method,
+            min_anchors=args.min_aps,
+            max_rssi_delta_db=None if args.no_rssi_filter else args.max_rssi_delta,
+            min_rssi_dbm=args.min_rssi,
+            min_samples_per_ap=args.min_samples_per_ap,
+            tx_power_dbm=args.tx_power,
+            path_loss_n=args.path_loss_n,
+            weight_temperature=args.weight_temperature,
+            fingerprint_store=fp_store,
+            fingerprint_k=args.fingerprint_k,
+            fingerprint_min_common_aps=args.fingerprint_min_common_aps,
+            fingerprint_min_common_fraction=args.fingerprint_min_common_fraction,
+            fingerprint_max_rms_db=(
+                None if args.no_fingerprint_max_rms else args.fingerprint_max_rms
+            ),
+            fingerprint_max_blend=args.fingerprint_max_blend,
+            fingerprint_fallback=not args.no_fingerprint_fallback,
+            fast_scan=effective_fast_scan(args),
+        )
     elapsed_s = monotonic() - t0
     position = smooth_position(
         _LAST_POSITION,
@@ -374,6 +469,38 @@ def main() -> int:
         help="Slower scans: iw long poll, nmcli fallback, delay between passes (max RSSI stability)",
     )
     parser.add_argument("--blocking-scan", action="store_true")
+    parser.add_argument(
+        "--background-scan",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Scan continuously in a background thread; each reading aggregates a "
+            "recency-weighted window instead of blocking on fresh scans "
+            "(default: on with --interval, off for one-shot runs; "
+            "--no-background-scan to disable)"
+        ),
+    )
+    parser.add_argument(
+        "--background-scan-interval",
+        type=float,
+        default=0.5,
+        metavar="SEC",
+        help="Pause between background scan passes (default: 0.5)",
+    )
+    parser.add_argument(
+        "--rssi-window",
+        type=float,
+        default=8.0,
+        metavar="SEC",
+        help="Sliding window of samples used per reading (default: 8)",
+    )
+    parser.add_argument(
+        "--rssi-half-life",
+        type=float,
+        default=2.5,
+        metavar="SEC",
+        help="Recency-weighting half-life; lower tracks motion faster (default: 2.5)",
+    )
     parser.add_argument("--interval", type=float, default=0.0, metavar="SEC")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -443,6 +570,22 @@ def main() -> int:
         help="Stand under this AP and record its RSSI fingerprint, then exit",
     )
     fp.add_argument(
+        "--record-fingerprint-here",
+        metavar="LABEL",
+        help=(
+            'Record a fingerprint with an arbitrary label (e.g. "Jane Smith\'s Desk") '
+            "at the coordinates given by --at, then exit"
+        ),
+    )
+    fp.add_argument(
+        "--at",
+        metavar="X,Y[,Z]",
+        help=(
+            "Floor-plan coordinates in meters for --record-fingerprint-here "
+            '(same frame as readings), e.g. --at "12.0,5.5"'
+        ),
+    )
+    fp.add_argument(
         "--list-fingerprints",
         action="store_true",
         help="List stored fingerprints and exit",
@@ -506,6 +649,15 @@ def main() -> int:
 
     if args.scans is not None and args.scans < 1:
         parser.error("--scans must be >= 1")
+    if args.record_fingerprint_here and not args.at:
+        parser.error('--record-fingerprint-here requires --at "X,Y" (meters)')
+    if args.at and not args.record_fingerprint_here:
+        parser.error("--at only applies to --record-fingerprint-here")
+    if args.at:
+        try:
+            parse_at_coordinates(args.at)
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.min_samples_per_ap is not None and args.min_samples_per_ap < 1:
         parser.error("--min-samples-per-ap must be >= 1")
     if not 0 <= args.smoothing_alpha <= 1:
@@ -517,6 +669,7 @@ def main() -> int:
 
     fp_actions = (
         args.record_fingerprint
+        or args.record_fingerprint_here
         or args.list_fingerprints
         or args.delete_fingerprint
         or args.clear_fingerprints
@@ -529,32 +682,62 @@ def main() -> int:
             return 1
 
     continuous = args.interval > 0 and not args.once
-    if not continuous:
-        try:
-            return run_once(args)
-        except (RuntimeError, ValueError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-
-    db_path = args.fingerprint_db or default_fingerprint_db_path(args.config)
-    print(
-        f"Scanning every {args.interval}s after each cycle completes ({args.config})\n"
-        f"  method={args.method} scans={args.scans or 'from config'} "
-        f"fast_scan={effective_fast_scan(args)} fingerprints={db_path}\n"
-        f"  (--interval is not the scan period; one cycle is ~3× WiFi scan time)\n"
-        f"  Ctrl+C to stop\n"
+    # Auto-enable for continuous runs (the moving-robot case); one-shot runs
+    # gain nothing from a scanner thread they would only wait on once.
+    background_scan = (
+        args.background_scan if args.background_scan is not None else continuous
     )
+
+    global _SCANNER
+    if background_scan:
+        config = effective_config(args)
+        _SCANNER = BackgroundScanner(
+            interface=args.interface,
+            network=config.scan_ssid,
+            backend=args.backend,
+            fast=effective_fast_scan(args),
+            blocking=args.blocking_scan,
+            interval_s=args.background_scan_interval,
+            window_s=args.rssi_window,
+            half_life_s=args.rssi_half_life,
+        )
+        _SCANNER.start()
+
     try:
-        while True:
+        if not continuous:
             try:
-                run_once(args)
+                return run_once(args)
             except (RuntimeError, ValueError) as exc:
                 print(f"error: {exc}", file=sys.stderr)
-            print()
-            time.sleep(args.interval)
-    except KeyboardInterrupt:
-        print("\nStopped.")
-        return 0
+                return 1
+
+        db_path = args.fingerprint_db or default_fingerprint_db_path(args.config)
+        cycle_note = (
+            "  (background scan: readings are near-instant from the rolling window)\n"
+            if background_scan
+            else "  (--interval is not the scan period; one cycle is ~3× WiFi scan time)\n"
+        )
+        print(
+            f"Scanning every {args.interval}s after each cycle completes ({args.config})\n"
+            f"  method={args.method} scans={args.scans or 'from config'} "
+            f"fast_scan={effective_fast_scan(args)} fingerprints={db_path}\n"
+            f"{cycle_note}"
+            f"  Ctrl+C to stop\n"
+        )
+        try:
+            while True:
+                try:
+                    run_once(args)
+                except (RuntimeError, ValueError) as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                print()
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            print("\nStopped.")
+            return 0
+    finally:
+        if _SCANNER is not None:
+            _SCANNER.stop()
 
 
 if __name__ == "__main__":

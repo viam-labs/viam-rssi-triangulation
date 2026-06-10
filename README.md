@@ -257,11 +257,16 @@ The same commands are available from **`test_scan_rssi.py`** without the Viam ap
 ```bash
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
   --record-fingerprint "Cafe, WoH1" --thorough-scan
+sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
+  --record-fingerprint-here "Jane Smith's Desk" --at "12.0,5.5" --thorough-scan
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --list-fingerprints
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --delete-fingerprint "Cafe, WoH1"
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --clear-fingerprints
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --set-device-z-m 1.2 --once
 ```
+
+`--record-fingerprint-here` mirrors the `record_fingerprint_here` do_command: any label string,
+with `--at "X,Y"` (or `"X,Y,Z"`) in the same meters frame as readings.
 
 Default DB path: `<config-dir>/fingerprints.sqlite` (e.g. `examples/fingerprints.sqlite`). Override with **`--fingerprint-db`**. **`--set-device-z-m`** mirrors **`set_device_z_m`** for the local wrapper (use with **`--once`** or **`--interval`** in the same invocation).
 
@@ -291,6 +296,107 @@ default `2.0` is a good starting point; raise it if the position is still jumpy
 while stationary, lower it toward `1.0` if it feels sluggish to follow you.
 
 Other optional attributes: `interface`, `backend`, `scan_delay_s`, `blocking_scan`, `strict_mac`, `tx_power_dbm`, `path_loss_n`, `fingerprint_db_path`, `fingerprint_k`, `fingerprint_min_common_aps`, `fingerprint_min_common_fraction`, `fingerprint_max_rms_db`, `fingerprint_fallback`.
+
+### Continuous background scanning (mobile robots)
+
+Blocking on `scan_count` WiFi scan passes per reading (often several seconds)
+makes the reported position lag and smear across the path while the robot
+moves. WiFi scans cannot run in parallel on one radio (the kernel serializes
+them), but they can be **pipelined**: a daemon thread scans continuously into a
+rolling, timestamped buffer, and `get_readings()` returns in milliseconds by
+aggregating the freshest window, weighting **newer samples higher**
+(exponential decay) — so the estimate tracks where the robot *is* rather than
+the average of where it has been. Stationary, the window still smooths each
+AP's RSSI in dB-space before triangulation, which steadies the position
+without the lag of position-space smoothing.
+
+**Background scanning is the default in the module** (the sensor is polled
+repeatedly on a robot, which is exactly the continuous case). Set
+`background_scan: false` to revert to blocking per-reading scans.
+
+| Attribute | Default | Role |
+|-----------|---------|------|
+| `background_scan` | `true` | Continuous scanner thread; `false` = blocking per-reading scans |
+| `background_scan_interval_s` | `0.5` | Pause between background scan passes |
+| `rssi_window_s` | `8.0` | Sliding window of samples used per reading |
+| `rssi_half_life_s` | `2.5` | Recency-weighting half-life; lower tracks motion faster, higher smooths more |
+
+Notes:
+
+- `scan_count` is ignored while background scanning is active; the window
+  typically spans many more passes than a blocking reading would.
+- Scan failures (e.g. a transiently busy interface) are retried with backoff
+  and surfaced in the reading error only if the whole window is empty.
+- Continuous scanning contends slightly more with normal traffic on the same
+  radio; raise `background_scan_interval_s` to back it off, or set
+  `background_scan: false`.
+- Local wrapper: background scanning turns on automatically with `--interval`
+  (one-shot runs use blocking scans). Disable with `--no-background-scan`;
+  tune with `--background-scan-interval`, `--rssi-window`, `--rssi-half-life`:
+
+```bash
+# background scanning is automatic here
+sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --interval 1
+
+# old blocking behavior
+sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
+  --interval 1 --no-background-scan
+```
+
+### Motion fusion (mobile robots)
+
+A WiFi RSSI fix is a noisy, biased absolute position; a robot's own motion is
+smooth and locally accurate but drifts. When you name one or more **optional**
+motion sources, `get_readings()` fuses them with the WiFi fix in an adaptive
+2D Kalman filter: it predicts from motion between scans and corrects with each
+fix, so the position barely moves while the robot is stationary and tracks
+quickly while driving. Fixes that disagree with the prediction by more than
+`fusion_max_innovation_m` are rejected as outliers (after several consecutive
+rejections the filter re-seeds, so it still recovers if the robot is moved).
+
+All three sources are optional and independent — configure none (filter off,
+behaves exactly as before), one, or several. Each is the **resource name** of a
+component/service already on the machine:
+
+| Attribute | Source | What it contributes |
+|-----------|--------|---------------------|
+| `movement_sensor` | A movement sensor (IMU, GPS, `wheeled-odometry`) | Speed from `get_linear_velocity()` → adapts smoothing (more responsive while moving) |
+| `slam` | A SLAM service | Relative pose delta from `get_position()` → directional prediction between fixes |
+| `base` | A base | `is_moving()` gate → freezes/heavily smooths when stopped, trusts motion when driving |
+
+```json
+{
+  "movement_sensor": "imu",
+  "slam": "slam-1",
+  "base": "base",
+  "motion_fusion": true
+}
+```
+
+| Attribute | Default | Role |
+|-----------|---------|------|
+| `motion_fusion` | auto | Master switch; on by default when any source is named, set `false` to disable |
+| `fusion_process_noise_m` | `0.5` | Baseline drift per reading while stationary (higher = follows fixes more) |
+| `fusion_measurement_noise_m` | `3.0` | Assumed WiFi fix error; auto-tightened by anchor count and fingerprint confidence |
+| `fusion_max_innovation_m` | `8.0` | Reject a fix that jumps more than this from the prediction (`0` disables gating) |
+| `fusion_speed_scale` | `1.0` | How strongly motion speed loosens smoothing |
+| `base_moving_speed_mps` | `0.5` | Assumed speed when only a base reports `is_moving` (no velocity source) |
+| `slam_yaw_offset_deg` | `0.0` | Rotate the SLAM motion delta into the floor frame if the SLAM map is rotated |
+| `slam_scale` | `1.0` | Scale correction if SLAM units don't match the floor plan |
+
+Notes:
+
+- SLAM gives the best results because it provides true directional motion. Its
+  map frame may be rotated/scaled relative to your floor plan — use
+  `slam_yaw_offset_deg` / `slam_scale` to align the **motion delta** (only
+  relative motion is used, so the SLAM origin need not match the floor origin).
+- A **base** has no odometry in the Viam API, so it acts only as a moving/stopped
+  gate. For true wheel odometry, configure a `wheeled-odometry` **movement
+  sensor** and name it under `movement_sensor`.
+- When motion fusion is active it replaces the simpler `smoothing_alpha` /
+  `max_position_step_m` filter; those still apply when no motion source is set.
+- Each motion read is best-effort: if a source errors, it is logged and skipped
+  for that reading rather than failing the position.
 
 ### Matching BSSIDs
 
@@ -401,7 +507,7 @@ sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
 
 Geometry only (no fingerprints): `--method weighted_centroid`. Tune blend with `--fingerprint-max-blend 0.5` (0 = centroid only, 1 = full fingerprint pull at max confidence).
 
-**Speed:** `hybrid` does not add extra WiFi scans. Each reading runs `scan_count` full scans (often **~2s each** on a Pi with `iw`, or longer if `iw` retries “device busy” then falls back to `wpa_cli`). So `--scans 3` is often **~6–7s per cycle**; `--interval 0.2` only sleeps 0.2s *after* that work finishes.
+**Speed:** `hybrid` does not add extra WiFi scans. With `--interval`, [background scanning](#continuous-background-scanning-mobile-robots) is on by default and each cycle is near-instant (it reads the rolling window). With `--no-background-scan` (or one-shot runs), each reading blocks on `scan_count` full scans (often **~2s each** on a Pi with `iw`, or longer if `iw` retries “device busy” then falls back to `wpa_cli`) — so `--scans 3` is often **~6–7s per cycle**, and `--interval 0.2` only sleeps 0.2s *after* that work finishes.
 
 **Fast scanning is the default** (`wpa_cli` first, short poll waits). For maximum RSSI stability when recording fingerprints, use `--thorough-scan` (slower, ~6–7s with `--scans 3`).
 
