@@ -121,7 +121,7 @@ Set **`fingerprint_db_path`** on the component (default: `fingerprints.sqlite` i
 2. Stand under each AP (or at a known spot) and call **`record_fingerprint`** (or **`record_fingerprint_here`**).
 3. Call **`list_fingerprints`** to verify entries.
 4. **`get_readings`** uses the DB automatically whenever it has entries.
-5. Once you have a handful of fingerprints, run **`calibrate_path_loss`** to fit `tx_power_dbm` / `path_loss_n` to your building and set the fitted values in the component config — this directly improves the geometric (centroid / path-loss) estimate.
+5. Once you have a handful of fingerprints, path-loss calibration runs **automatically** (default: every hour, first reading sooner) and applies fitted `tx_power_dbm` / `path_loss_n` in memory. You can also run **`calibrate_path_loss`** manually and persist the values in the component config if you want them fixed across restarts.
 
 Re-record an AP by running **`record_fingerprint`** again with the same name (replaces the row). Use **`--scan-mode thorough`** on the local wrapper, or set **`scan_mode: "thorough"`** on the component, for steadier RSSI while calibrating.
 
@@ -303,8 +303,9 @@ sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --de
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --clear-fingerprints
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --set-device-z-m 1.2 --once
 python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --calibrate-path-loss
-# Calibrate and immediately position with the fitted values (one run):
-sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --apply-calibration --once
+# Positioning auto-calibrates from fingerprints by default (first reading, then hourly):
+sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --once
+# Disable: --no-auto-calibrate-path-loss. Tune interval: --path-loss-calibration-interval 600
 ```
 
 `--record-fingerprint-here` mirrors the `record_fingerprint_here` do_command: any label string,
@@ -336,7 +337,12 @@ contribute, trading a little responsiveness for a much steadier position. The
 default `2.0` is a good starting point; raise it if the position is still jumpy
 while stationary, lower it toward `1.0` if it feels sluggish to follow you.
 
+| `auto_calibrate_path_loss` | `true` | Periodically fit `tx_power_dbm` / `path_loss_n` from the fingerprint DB and apply in memory |
+| `path_loss_calibration_interval_s` | `3600` | Seconds between automatic path-loss calibrations |
+
 Other optional attributes: `interface`, `backend`, `scan_delay_s`, `strict_mac`, `tx_power_dbm`, `path_loss_n`, `fingerprint_db_path`, `fingerprint_k`, `fingerprint_min_common_aps`, `fingerprint_min_common_fraction`, `fingerprint_max_rms_db`.
+
+Automatic calibration needs enough stored fingerprints (same minimum as `calibrate_path_loss`). Fits with implausible `tx_power_dbm` or `path_loss_n` are skipped. Applied values live until restart — copy fitted values into `tx_power_dbm` / `path_loss_n` in the config to make them permanent, or rely on auto-calibration to refresh them periodically.
 
 ### Continuous background scanning (mobile robots)
 

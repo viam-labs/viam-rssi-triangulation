@@ -23,7 +23,10 @@ from time import monotonic
 from dataclasses import asdict
 from pathlib import Path
 
-from rssi_triangulation.calibrate import calibrate_from_fingerprints
+from rssi_triangulation.calibrate import (
+    calibrate_from_fingerprints,
+    try_periodic_path_loss_calibration,
+)
 from rssi_triangulation.fingerprint import FingerprintStore
 from rssi_triangulation.fingerprint_commands import (
     default_fingerprint_db_path,
@@ -48,6 +51,7 @@ from rssi_triangulation.scanner import BackgroundScanner
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "examples" / "module_config_viam-5g.json"
 _LAST_POSITION: PositionReading | None = None
 _DEVICE_Z_M: float | None = None
+_LAST_PATH_LOSS_CALIBRATION_MONOTONIC: float | None = None
 _FP_STORE: FingerprintStore | None = None
 _FP_STORE_PATH: Path | None = None
 _SCANNER: BackgroundScanner | None = None
@@ -104,6 +108,48 @@ def fingerprint_db(args: argparse.Namespace) -> FingerprintStore:
         _FP_STORE = FingerprintStore(path)
         _FP_STORE_PATH = path
     return _FP_STORE
+
+
+def maybe_auto_calibrate_args(args: argparse.Namespace) -> None:
+    """Fit and apply path-loss parameters when the interval has elapsed."""
+    global _LAST_PATH_LOSS_CALIBRATION_MONOTONIC
+    if not args.auto_calibrate_path_loss:
+        return
+    tx, n, last, result = try_periodic_path_loss_calibration(
+        effective_config(args),
+        fingerprint_db(args),
+        current_tx_power_dbm=args.tx_power,
+        current_path_loss_n=args.path_loss_n,
+        last_calibration_monotonic=_LAST_PATH_LOSS_CALIBRATION_MONOTONIC,
+        interval_s=args.path_loss_calibration_interval,
+        now=monotonic(),
+    )
+    _LAST_PATH_LOSS_CALIBRATION_MONOTONIC = last
+    args.tx_power = tx
+    args.path_loss_n = n
+    if result is None or result.get("skipped"):
+        return
+    if result.get("applied"):
+        current = result.get("current", {})
+        print(
+            f"Auto-applied path loss: tx_power_dbm={args.tx_power:.2f} "
+            f"path_loss_n={args.path_loss_n:.3f} "
+            f"(rmse {result['rmse_db']:.1f} dB over {result['sample_count']} samples"
+            + (
+                f", was {current['rmse_db']:.1f} dB"
+                if "rmse_db" in current
+                else ""
+            )
+            + ")",
+            file=sys.stderr,
+        )
+        for warning in result.get("warnings", []):
+            print(f"  warning: {warning}", file=sys.stderr)
+    elif result.get("ok"):
+        print(
+            f"path loss auto-calibration not applied: {result.get('warnings')}",
+            file=sys.stderr,
+        )
 
 
 def format_report(
@@ -614,10 +660,25 @@ def main() -> int:
         "--apply-calibration",
         action="store_true",
         help=(
-            "Fit path loss from stored fingerprints and use the fitted "
-            "tx_power_dbm / path_loss_n for this run's positioning "
-            "(overrides --tx-power / --path-loss-n)"
+            "Fit path loss once at startup and use the fitted "
+            "tx_power_dbm / path_loss_n (same as the first auto-calibration tick)"
         ),
+    )
+    fp.add_argument(
+        "--auto-calibrate-path-loss",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Periodically fit tx_power_dbm / path_loss_n from stored fingerprints "
+            "and apply in memory (default: on)"
+        ),
+    )
+    fp.add_argument(
+        "--path-loss-calibration-interval",
+        type=float,
+        default=3600.0,
+        metavar="SEC",
+        help="Seconds between automatic path-loss calibrations (default: 3600)",
     )
     fp.add_argument(
         "--set-device-z-m",
@@ -676,8 +737,10 @@ def main() -> int:
         parser.error("--min-samples-per-ap must be >= 1")
     if not 0 <= args.smoothing_alpha <= 1:
         parser.error("--smoothing-alpha must be between 0 and 1")
+    if args.path_loss_calibration_interval <= 0:
+        parser.error("--path-loss-calibration-interval must be > 0")
 
-    global _DEVICE_Z_M
+    global _DEVICE_Z_M, _LAST_PATH_LOSS_CALIBRATION_MONOTONIC
     if args.set_device_z_m is not None:
         _DEVICE_Z_M = float(args.set_device_z_m)
 
@@ -709,6 +772,7 @@ def main() -> int:
             return 1
         args.tx_power = float(fit["tx_power_dbm"])
         args.path_loss_n = float(fit["path_loss_n"])
+        _LAST_PATH_LOSS_CALIBRATION_MONOTONIC = monotonic()
         print(
             f"Applied calibrated path loss: tx_power_dbm={args.tx_power:.2f} "
             f"path_loss_n={args.path_loss_n:.3f} "
@@ -718,6 +782,8 @@ def main() -> int:
         )
         for warning in fit.get("warnings", []):
             print(f"  warning: {warning}", file=sys.stderr)
+    else:
+        maybe_auto_calibrate_args(args)
 
     continuous = args.interval > 0 and not args.once
     # Auto-enable for continuous runs (the moving-robot case); one-shot runs
@@ -764,6 +830,7 @@ def main() -> int:
         )
         try:
             while True:
+                maybe_auto_calibrate_args(args)
                 try:
                     run_once(args)
                 except (RuntimeError, ValueError) as exc:

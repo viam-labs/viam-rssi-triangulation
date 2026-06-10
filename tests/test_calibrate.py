@@ -12,6 +12,8 @@ from rssi_triangulation.calibrate import (
     path_loss_rmse_db,
     per_ap_residuals,
     samples_from_fingerprints,
+    should_auto_apply_path_loss_calibration,
+    try_periodic_path_loss_calibration,
 )
 from rssi_triangulation.fingerprint import FingerprintStore
 from rssi_triangulation.fingerprint_commands import execute_fingerprint_command
@@ -166,3 +168,66 @@ def test_path_loss_rmse_db_zero_for_exact_model() -> None:
     assert path_loss_rmse_db(samples, tx_power_dbm=-40.0, path_loss_n=2.5) == pytest.approx(
         0.0, abs=1e-9
     )
+
+
+def test_should_auto_apply_rejects_implausible_fit() -> None:
+    assert should_auto_apply_path_loss_calibration({"ok": True}) is True
+    assert should_auto_apply_path_loss_calibration({"ok": False}) is False
+    assert should_auto_apply_path_loss_calibration(
+        {
+            "ok": True,
+            "warnings": [
+                "fitted path_loss_n=0.50 is outside the plausible indoor range [1.5, 6.0]"
+            ],
+        }
+    ) is False
+
+
+def test_try_periodic_path_loss_calibration_runs_once_then_waits(tmp_path) -> None:
+    tx, n = -42.0, 3.0
+    config = parse_config_dict(
+        {
+            "scan_ssid": "Net",
+            "scan_count": 1,
+            "access_points": [
+                {"name": "A", "x_m": 0.0, "y_m": 0.0, "bssid": "aa:bb:cc:dd:ee:01"},
+                {"name": "B", "x_m": 20.0, "y_m": 0.0, "bssid": "aa:bb:cc:dd:ee:02"},
+                {"name": "C", "x_m": 0.0, "y_m": 20.0, "bssid": "aa:bb:cc:dd:ee:03"},
+            ],
+        }
+    )
+    ap_xy = {"A": (0.0, 0.0), "B": (20.0, 0.0), "C": (0.0, 20.0)}
+    db = FingerprintStore(tmp_path / "fp.sqlite")
+    for label, (fx, fy) in {"p1": (2.0, 2.0), "p2": (10.0, 5.0), "p3": (18.0, 16.0)}.items():
+        rssi = {
+            name: _model_rssi(math.hypot(fx - x, fy - y), tx=tx, n=n)
+            for name, (x, y) in ap_xy.items()
+        }
+        db.record(label, x_m=fx, y_m=fy, rssi_by_ap=rssi, scan_count=1)
+
+    out_tx, out_n, last, result = try_periodic_path_loss_calibration(
+        config,
+        db,
+        current_tx_power_dbm=-40.0,
+        current_path_loss_n=2.5,
+        last_calibration_monotonic=None,
+        interval_s=3600.0,
+        now=100.0,
+    )
+    assert result is not None
+    assert result["applied"] is True
+    assert out_tx == pytest.approx(tx, abs=0.05)
+    assert out_n == pytest.approx(n, abs=0.01)
+    assert last == 100.0
+
+    _, _, last2, result2 = try_periodic_path_loss_calibration(
+        config,
+        db,
+        current_tx_power_dbm=out_tx,
+        current_path_loss_n=out_n,
+        last_calibration_monotonic=last,
+        interval_s=3600.0,
+        now=200.0,
+    )
+    assert result2 is None
+    assert last2 == last

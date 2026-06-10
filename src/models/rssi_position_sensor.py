@@ -21,6 +21,7 @@ from viam.resource.types import Model, ModelFamily
 from viam.services.slam import SLAMClient
 from viam.utils import SensorReading, ValueTypes
 
+from rssi_triangulation.calibrate import try_periodic_path_loss_calibration
 from rssi_triangulation.fingerprint import FingerprintStore
 from rssi_triangulation.fingerprint_commands import execute_fingerprint_command
 from rssi_triangulation.fusion import (
@@ -104,6 +105,9 @@ class RssiPositionSensor(Sensor, EasyResource):
     _min_samples_per_ap: int | None
     _tx_power_dbm: float
     _path_loss_n: float
+    _auto_calibrate_path_loss: bool
+    _path_loss_calibration_interval_s: float
+    _last_path_loss_calibration_monotonic: float | None
     _weight_temperature: float
     _fingerprint_db_path: Path
     _fingerprint_k: int
@@ -183,6 +187,17 @@ class RssiPositionSensor(Sensor, EasyResource):
         sensor._path_loss_n = (
             fields["path_loss_n"].number_value if "path_loss_n" in fields else 2.5
         )
+        sensor._auto_calibrate_path_loss = (
+            fields["auto_calibrate_path_loss"].bool_value
+            if "auto_calibrate_path_loss" in fields
+            else True
+        )
+        sensor._path_loss_calibration_interval_s = (
+            fields["path_loss_calibration_interval_s"].number_value
+            if "path_loss_calibration_interval_s" in fields
+            else 3600.0
+        )
+        sensor._last_path_loss_calibration_monotonic = None
         sensor._weight_temperature = (
             fields["weight_temperature"].number_value
             if "weight_temperature" in fields
@@ -356,6 +371,45 @@ class RssiPositionSensor(Sensor, EasyResource):
             self._fingerprint_store = FingerprintStore(self._fingerprint_db_path)
         return self._fingerprint_store
 
+    def _maybe_auto_calibrate_path_loss(self) -> None:
+        if not self._auto_calibrate_path_loss:
+            return
+        (
+            self._tx_power_dbm,
+            self._path_loss_n,
+            self._last_path_loss_calibration_monotonic,
+            result,
+        ) = try_periodic_path_loss_calibration(
+            self._config,
+            self._get_fingerprint_store(),
+            current_tx_power_dbm=self._tx_power_dbm,
+            current_path_loss_n=self._path_loss_n,
+            last_calibration_monotonic=self._last_path_loss_calibration_monotonic,
+            interval_s=self._path_loss_calibration_interval_s,
+            now=monotonic(),
+        )
+        if result is None:
+            return
+        if result.get("skipped"):
+            self.logger.debug(
+                "path loss auto-calibration skipped: %s", result.get("reason")
+            )
+            return
+        if result.get("applied"):
+            self.logger.info(
+                "auto-applied path loss calibration: tx_power_dbm=%.2f path_loss_n=%.3f "
+                "(rmse %.1f dB, %d samples)",
+                self._tx_power_dbm,
+                self._path_loss_n,
+                result.get("rmse_db", 0.0),
+                result.get("sample_count", 0),
+            )
+        elif result.get("ok"):
+            self.logger.warning(
+                "path loss auto-calibration fit not applied: %s",
+                result.get("warnings"),
+            )
+
     async def close(self) -> None:
         if self._scanner is not None:
             await asyncio.to_thread(self._scanner.stop)
@@ -489,6 +543,7 @@ class RssiPositionSensor(Sensor, EasyResource):
         **kwargs,
     ) -> Mapping[str, SensorReading]:
         del extra, timeout, kwargs
+        await asyncio.to_thread(self._maybe_auto_calibrate_path_loss)
         if self._scanner is not None:
             (
                 raw_xy,

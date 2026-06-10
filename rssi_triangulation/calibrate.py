@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any, Mapping
 
 from .fingerprint import FingerprintRecord, FingerprintStore
 from .module_config import LocatorConfig
@@ -244,3 +245,65 @@ def calibrate_from_fingerprints(
             ),
         }
     return result
+
+
+def should_auto_apply_path_loss_calibration(result: Mapping[str, Any]) -> bool:
+    """True when a periodic calibration fit is safe to apply in-memory."""
+    if not result.get("ok"):
+        return False
+    for warning in result.get("warnings", []):
+        if "outside the plausible" in warning:
+            return False
+    return True
+
+
+def try_periodic_path_loss_calibration(
+    config: LocatorConfig,
+    db: FingerprintStore,
+    *,
+    current_tx_power_dbm: float,
+    current_path_loss_n: float,
+    last_calibration_monotonic: float | None,
+    interval_s: float,
+    now: float,
+) -> tuple[float, float, float, dict | None]:
+    """Run path-loss calibration when ``interval_s`` has elapsed.
+
+    Returns ``(tx_power_dbm, path_loss_n, last_calibration_monotonic, result)``.
+    ``result`` is None when not due yet. On insufficient fingerprints the fit
+    is skipped but ``last_calibration_monotonic`` is still advanced so an empty
+    DB is not polled on every reading.
+    """
+    if (
+        last_calibration_monotonic is not None
+        and now - last_calibration_monotonic < interval_s
+    ):
+        return (
+            current_tx_power_dbm,
+            current_path_loss_n,
+            last_calibration_monotonic,
+            None,
+        )
+
+    try:
+        result = calibrate_from_fingerprints(
+            config,
+            db,
+            current_tx_power_dbm=current_tx_power_dbm,
+            current_path_loss_n=current_path_loss_n,
+        )
+    except ValueError as exc:
+        return current_tx_power_dbm, current_path_loss_n, now, {
+            "ok": False,
+            "skipped": True,
+            "reason": str(exc),
+            "auto": True,
+        }
+
+    applied = should_auto_apply_path_loss_calibration(result)
+    if applied:
+        current_tx_power_dbm = float(result["tx_power_dbm"])
+        current_path_loss_n = float(result["path_loss_n"])
+    result["applied"] = applied
+    result["auto"] = True
+    return current_tx_power_dbm, current_path_loss_n, now, result
