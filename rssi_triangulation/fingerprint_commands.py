@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from .calibrate import MIN_SAMPLE_DISTANCE_M, calibrate_from_fingerprints
 from .geo import infer_xy_from_slant_distances
 from .fingerprint import FingerprintStore, matched_to_rssi_dict
+from .fingerprint_session import get_fingerprint_session_manager
 from .locate import (
     ap_position_in_reading_frame,
     collect_matched_scan,
@@ -93,6 +94,11 @@ def execute_fingerprint_command(
       clear_fingerprints — { "command": "clear_fingerprints" }
       calibrate_path_loss — { "command": "calibrate_path_loss" } fits
           tx_power_dbm / path_loss_n from stored fingerprints
+      start_fingerprint_recording — begin accumulating scans (see stop_*)
+      sample_fingerprint_recording — add one scan to the active session
+      fingerprint_recording_status — sample count and session metadata
+      stop_fingerprint_recording — aggregate samples (mean/std per AP) and store
+      cancel_fingerprint_recording — discard the active session
     """
     name = command.get("command")
     if not isinstance(name, str) or not name:
@@ -116,10 +122,53 @@ def execute_fingerprint_command(
                     "ap_count": len(r.rssi_by_ap),
                     "recorded_at": r.recorded_at,
                     "scan_count": r.scan_count,
+                    "rssi_stats_by_ap": r.rssi_stats_by_ap or {},
                 }
                 for r in records
             ],
         }
+
+    if name == "fingerprint_recording_status":
+        status = get_fingerprint_session_manager().status()
+        return {"ok": True, "command": name, **status}
+
+    if name == "cancel_fingerprint_recording":
+        result = get_fingerprint_session_manager().cancel()
+        result["command"] = name
+        return result
+
+    if name == "start_fingerprint_recording":
+        return _start_fingerprint_recording(command, config=config)
+
+    if name == "sample_fingerprint_recording":
+        return _sample_fingerprint_recording(
+            command,
+            config=config,
+            interface=interface,
+            backend=backend,
+            scan_delay_s=scan_delay_s,
+            blocking=blocking,
+            strict_mac=strict_mac,
+            min_samples_per_ap=min_samples_per_ap,
+            scan_count_override=scan_count_override,
+            fast_scan=fast_scan,
+        )
+
+    if name == "stop_fingerprint_recording":
+        return _stop_fingerprint_recording(
+            command,
+            config=config,
+            db=db,
+            interface=interface,
+            backend=backend,
+            scan_delay_s=scan_delay_s,
+            blocking=blocking,
+            strict_mac=strict_mac,
+            min_samples_per_ap=min_samples_per_ap,
+            scan_count_override=scan_count_override,
+            device_z_m=device_z_m,
+            fast_scan=fast_scan,
+        )
 
     if name == "delete_fingerprint":
         label = command.get("label") or command.get("ap_name")
@@ -191,9 +240,200 @@ def execute_fingerprint_command(
 
     raise ValueError(
         f"unknown fingerprint command {name!r}; supported: record_fingerprint, "
-        "record_fingerprint_here, record_fingerprint_rssi, match_fingerprints, "
+        "record_fingerprint_here, record_fingerprint_rssi, start_fingerprint_recording, "
+        "sample_fingerprint_recording, fingerprint_recording_status, "
+        "stop_fingerprint_recording, cancel_fingerprint_recording, match_fingerprints, "
         "list_fingerprints, delete_fingerprint, clear_fingerprints, calibrate_path_loss"
     )
+
+
+def _start_fingerprint_recording(
+    command: Mapping[str, Any],
+    *,
+    config: LocatorConfig,
+) -> dict[str, Any]:
+    label = command.get("label")
+    if label is not None and (not isinstance(label, str) or not label):
+        raise ValueError('"label" must be a non-empty string when provided')
+    distances_by_ap = {}
+    if command.get("distances_m") or command.get("distance_to_ap"):
+        distances_by_ap = parse_distances_m(command, config)
+    min_samples = int(command.get("min_samples", 5))
+    auto_sample = command.get("auto_sample", True)
+    if not isinstance(auto_sample, bool):
+        auto_sample = bool(auto_sample)
+    positioned = bool(command.get("positioned", False))
+    x_m = y_m = z_m = None
+    if "x_m" in command and "y_m" in command:
+        x_m = float(command["x_m"])
+        y_m = float(command["y_m"])
+        positioned = True
+        if "z_m" in command:
+            z_m = float(command["z_m"])
+    status = get_fingerprint_session_manager().start(
+        label=label,
+        x_m=x_m,
+        y_m=y_m,
+        z_m=z_m,
+        positioned=positioned,
+        distances_by_ap=distances_by_ap or None,
+        min_samples=min_samples,
+        auto_sample=auto_sample,
+    )
+    return {
+        "ok": True,
+        "command": "start_fingerprint_recording",
+        **status,
+        "hint": (
+            "While recording: keep get_readings() or test_scan_rssi.py running "
+            "(auto_sample=true), or call sample_fingerprint_recording periodically. "
+            "Then stop_fingerprint_recording."
+        ),
+    }
+
+
+def _sample_fingerprint_recording(
+    command: Mapping[str, Any],
+    *,
+    config: LocatorConfig,
+    interface: str | None,
+    backend: str | None,
+    scan_delay_s: float,
+    blocking: bool,
+    strict_mac: bool,
+    min_samples_per_ap: int | None,
+    scan_count_override: int | None,
+    fast_scan: bool,
+) -> dict[str, Any]:
+    manager = get_fingerprint_session_manager()
+    if not manager.active():
+        raise RuntimeError("no active fingerprint recording session")
+    matched, backend_name, _aggregated, scans_done = collect_matched_scan(
+        config,
+        interface=interface,
+        backend=backend,
+        scan_delay_s=scan_delay_s,
+        blocking=blocking,
+        strict_mac=strict_mac,
+        min_samples_per_ap=min_samples_per_ap,
+        scan_count_override=scan_count_override or 1,
+        fast_scan=fast_scan,
+    )
+    count = manager.add_sample(matched_to_rssi_dict(matched))
+    return {
+        "ok": True,
+        "command": "sample_fingerprint_recording",
+        "sample_count": count,
+        "bssids_heard": len(matched),
+        "backend": backend_name,
+        "scans": scans_done,
+        **manager.status(),
+    }
+
+
+def _stop_fingerprint_recording(
+    command: Mapping[str, Any],
+    *,
+    config: LocatorConfig,
+    db: FingerprintStore,
+    interface: str | None,
+    backend: str | None,
+    scan_delay_s: float,
+    blocking: bool,
+    strict_mac: bool,
+    min_samples_per_ap: int | None,
+    scan_count_override: int | None,
+    device_z_m: float | None,
+    fast_scan: bool,
+) -> dict[str, Any]:
+    manager = get_fingerprint_session_manager()
+    if not manager.active():
+        raise RuntimeError("no active fingerprint recording session")
+
+    extra_scans = command.get("scan_count")
+    if extra_scans is not None:
+        matched, _backend_name, _aggregated, _scans_done = collect_matched_scan(
+            config,
+            interface=interface,
+            backend=backend,
+            scan_delay_s=scan_delay_s,
+            blocking=blocking,
+            strict_mac=strict_mac,
+            min_samples_per_ap=min_samples_per_ap,
+            scan_count_override=int(extra_scans),
+            fast_scan=fast_scan,
+        )
+        manager.add_sample(matched_to_rssi_dict(matched))
+
+    distances_override = None
+    if command.get("distances_m") or command.get("distance_to_ap"):
+        distances_override = parse_distances_m(command, config)
+
+    label = command.get("label")
+    if label is not None and (not isinstance(label, str) or not label):
+        raise ValueError('"label" must be a non-empty string when provided')
+
+    positioned_arg = None
+    if "positioned" in command:
+        positioned_arg = bool(command["positioned"])
+    x_m = float(command["x_m"]) if "x_m" in command else None
+    y_m = float(command["y_m"]) if "y_m" in command else None
+    z_m = float(command["z_m"]) if "z_m" in command else None
+    if x_m is not None and y_m is not None:
+        positioned_arg = True
+
+    session, means, stats = manager.stop(
+        label=label,
+        x_m=x_m,
+        y_m=y_m,
+        z_m=z_m,
+        positioned=positioned_arg,
+        distances_by_ap=distances_override,
+    )
+
+    effective_z = config.device_z_m if device_z_m is None else device_z_m
+    distances = dict(session.distances_by_ap)
+    missing_rssi = sorted(set(distances) - set(means))
+    if missing_rssi:
+        raise ValueError(
+            "distance_to_ap includes APs not heard during recording: "
+            + ", ".join(missing_rssi)
+        )
+
+    positioned = session.positioned
+    x_out = session.x_m or 0.0
+    y_out = session.y_m or 0.0
+    z_out = session.z_m if session.z_m is not None else effective_z
+    if x_m is not None and y_m is not None:
+        x_out, y_out = x_m, y_m
+        positioned = True
+
+    record = db.record(
+        session.label or "",
+        x_m=x_out,
+        y_m=y_out,
+        z_m=z_out,
+        rssi_by_ap=means,
+        scan_count=len(session.samples),
+        positioned=positioned,
+        distances_by_ap=distances or None,
+        rssi_stats_by_ap=stats,
+    )
+    return {
+        "ok": True,
+        "command": "stop_fingerprint_recording",
+        "label": record.label,
+        "positioned": positioned,
+        "x_m": record.x_m if positioned else None,
+        "y_m": record.y_m if positioned else None,
+        "z_m": record.z_m if positioned else None,
+        "distances_m": record.distances_by_ap or {},
+        "ap_rssi": record.rssi_by_ap,
+        "rssi_stats_by_ap": record.rssi_stats_by_ap or {},
+        "sample_count": len(session.samples),
+        "db_path": str(db.path),
+        "recorded_at": record.recorded_at,
+    }
 
 
 def _match_fingerprints(

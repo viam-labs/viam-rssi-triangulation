@@ -23,6 +23,7 @@ class FingerprintRecord:
     scan_count: int
     positioned: bool = True
     distances_by_ap: dict[str, float] | None = None
+    rssi_stats_by_ap: dict[str, dict[str, float]] | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,14 @@ class FingerprintStore:
                     conn.execute(
                         "ALTER TABLE fingerprints ADD COLUMN distances_json TEXT"
                     )
+                cols = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(fingerprints)")
+                }
+                if "rssi_stats_json" not in cols:
+                    conn.execute(
+                        "ALTER TABLE fingerprints ADD COLUMN rssi_stats_json TEXT"
+                    )
                 conn.commit()
 
     def record(
@@ -182,12 +191,15 @@ class FingerprintStore:
         scan_count: int,
         positioned: bool = True,
         distances_by_ap: dict[str, float] | None = None,
+        rssi_stats_by_ap: dict[str, dict[str, float]] | None = None,
     ) -> FingerprintRecord:
         if not rssi_by_ap:
             raise ValueError("fingerprint has no AP RSSI readings")
         distances = dict(distances_by_ap or {})
+        stats = dict(rssi_stats_by_ap or {})
         payload = json.dumps(rssi_by_ap, sort_keys=True)
         distances_payload = json.dumps(distances, sort_keys=True) if distances else None
+        stats_payload = json.dumps(stats, sort_keys=True) if stats else None
         recorded_at = datetime.now(timezone.utc).isoformat()
         with self._lock:
             with self._connect() as conn:
@@ -195,9 +207,9 @@ class FingerprintStore:
                     """
                     INSERT INTO fingerprints (
                         label, x_m, y_m, z_m, rssi_json, recorded_at, scan_count,
-                        positioned, distances_json
+                        positioned, distances_json, rssi_stats_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(label) DO UPDATE SET
                         x_m = excluded.x_m,
                         y_m = excluded.y_m,
@@ -206,7 +218,8 @@ class FingerprintStore:
                         recorded_at = excluded.recorded_at,
                         scan_count = excluded.scan_count,
                         positioned = excluded.positioned,
-                        distances_json = excluded.distances_json
+                        distances_json = excluded.distances_json,
+                        rssi_stats_json = excluded.rssi_stats_json
                     """,
                     (
                         label,
@@ -218,6 +231,7 @@ class FingerprintStore:
                         scan_count,
                         1 if positioned else 0,
                         distances_payload,
+                        stats_payload,
                     ),
                 )
                 row_id = conn.execute(
@@ -236,6 +250,7 @@ class FingerprintStore:
             scan_count=scan_count,
             positioned=positioned,
             distances_by_ap=distances or None,
+            rssi_stats_by_ap=stats or None,
         )
 
     def list_all(self) -> list[FingerprintRecord]:
@@ -246,7 +261,7 @@ class FingerprintStore:
             with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT id, label, x_m, y_m, z_m, rssi_json, recorded_at, scan_count, "
-                    "positioned, distances_json "
+                    "positioned, distances_json, rssi_stats_json "
                     "FROM fingerprints ORDER BY label"
                 ).fetchall()
             self._cache = [_row_to_record(row) for row in rows]
@@ -373,6 +388,15 @@ def _row_to_record(row: sqlite3.Row) -> FingerprintRecord:
         if distances_raw
         else None
     )
+    stats_raw = row["rssi_stats_json"] if "rssi_stats_json" in keys else None
+    rssi_stats_by_ap = (
+        {
+            str(k): {str(sk): float(sv) for sk, sv in v.items()}
+            for k, v in json.loads(stats_raw).items()
+        }
+        if stats_raw
+        else None
+    )
     return FingerprintRecord(
         id=int(row["id"]),
         label=str(row["label"]),
@@ -384,4 +408,5 @@ def _row_to_record(row: sqlite3.Row) -> FingerprintRecord:
         scan_count=int(row["scan_count"]),
         positioned=positioned,
         distances_by_ap=distances_by_ap,
+        rssi_stats_by_ap=rssi_stats_by_ap,
     )

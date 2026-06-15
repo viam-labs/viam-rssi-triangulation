@@ -251,6 +251,76 @@ def parse_distance_to_ap(value: str) -> tuple[str, float]:
     )
 
 
+def run_fingerprint_session_recording(
+    args: argparse.Namespace,
+    *,
+    config: LocatorConfig,
+    db: FingerprintStore,
+) -> dict:
+    """Timed start → repeated samples → stop (one process)."""
+    start: dict = {
+        "command": "start_fingerprint_recording",
+        "label": args.record_fingerprint_session,
+        "min_samples": args.min_samples,
+        "auto_sample": False,
+    }
+    if args.distance_to_ap:
+        start["distance_to_ap"] = [
+            {"ap_name": ap_name, "distance_m": distance_m}
+            for ap_name, distance_m in (
+                parse_distance_to_ap(item) for item in args.distance_to_ap
+            )
+        ]
+    if args.at:
+        x_m, y_m, z_m = parse_at_coordinates(args.at)
+        start["x_m"] = x_m
+        start["y_m"] = y_m
+        if z_m is not None:
+            start["z_m"] = z_m
+    execute_fingerprint_command(
+        start,
+        config=config,
+        db=db,
+        interface=args.interface,
+        backend=args.backend,
+        scan_delay_s=effective_scan_delay(args),
+        blocking=effective_blocking(args),
+        strict_mac=args.strict_mac,
+        min_samples_per_ap=args.min_samples_per_ap,
+        device_z_m=effective_device_z_m(config),
+        fast_scan=effective_fast_scan(args),
+    )
+    deadline = monotonic() + args.session_duration
+    interval = max(args.session_interval, 0.2)
+    while monotonic() < deadline:
+        execute_fingerprint_command(
+            {"command": "sample_fingerprint_recording"},
+            config=config,
+            db=db,
+            interface=args.interface,
+            backend=args.backend,
+            scan_delay_s=effective_scan_delay(args),
+            blocking=effective_blocking(args),
+            strict_mac=args.strict_mac,
+            min_samples_per_ap=args.min_samples_per_ap,
+            fast_scan=effective_fast_scan(args),
+        )
+        time.sleep(interval)
+    return execute_fingerprint_command(
+        {"command": "stop_fingerprint_recording"},
+        config=config,
+        db=db,
+        interface=args.interface,
+        backend=args.backend,
+        scan_delay_s=effective_scan_delay(args),
+        blocking=effective_blocking(args),
+        strict_mac=args.strict_mac,
+        min_samples_per_ap=args.min_samples_per_ap,
+        device_z_m=effective_device_z_m(config),
+        fast_scan=effective_fast_scan(args),
+    )
+
+
 def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
     config = effective_config(args)
     db = fingerprint_db(args)
@@ -353,6 +423,67 @@ def run_fingerprint_cli_action(args: argparse.Namespace) -> int:
             scan_count_override=args.scans,
             device_z_m=device_z_m,
             fast_scan=effective_fast_scan(args),
+        )
+    elif args.record_fingerprint_session:
+        result = run_fingerprint_session_recording(args, config=config, db=db)
+    elif args.start_fingerprint_recording:
+        command: dict = {
+            "command": "start_fingerprint_recording",
+            "label": args.start_fingerprint_recording,
+            "min_samples": args.min_samples,
+            "auto_sample": False,
+        }
+        if args.distance_to_ap:
+            command["distance_to_ap"] = [
+                {"ap_name": ap_name, "distance_m": distance_m}
+                for ap_name, distance_m in (
+                    parse_distance_to_ap(item) for item in args.distance_to_ap
+                )
+            ]
+        if args.at:
+            x_m, y_m, z_m = parse_at_coordinates(args.at)
+            command["x_m"] = x_m
+            command["y_m"] = y_m
+            if z_m is not None:
+                command["z_m"] = z_m
+        result = execute_fingerprint_command(
+            command,
+            config=config,
+            db=db,
+            interface=args.interface,
+            backend=args.backend,
+            scan_delay_s=effective_scan_delay(args),
+            blocking=effective_blocking(args),
+            strict_mac=args.strict_mac,
+            min_samples_per_ap=args.min_samples_per_ap,
+            device_z_m=device_z_m,
+            fast_scan=effective_fast_scan(args),
+        )
+    elif args.stop_fingerprint_recording:
+        result = execute_fingerprint_command(
+            {"command": "stop_fingerprint_recording"},
+            config=config,
+            db=db,
+            interface=args.interface,
+            backend=args.backend,
+            scan_delay_s=effective_scan_delay(args),
+            blocking=effective_blocking(args),
+            strict_mac=args.strict_mac,
+            min_samples_per_ap=args.min_samples_per_ap,
+            device_z_m=device_z_m,
+            fast_scan=effective_fast_scan(args),
+        )
+    elif args.fingerprint_recording_status:
+        result = execute_fingerprint_command(
+            {"command": "fingerprint_recording_status"},
+            config=config,
+            db=db,
+        )
+    elif args.cancel_fingerprint_recording:
+        result = execute_fingerprint_command(
+            {"command": "cancel_fingerprint_recording"},
+            config=config,
+            db=db,
         )
     elif args.record_fingerprint_here:
         x_m, y_m, z_m = parse_at_coordinates(args.at)
@@ -698,6 +829,58 @@ def main() -> int:
         ),
     )
     fp.add_argument(
+        "--record-fingerprint-session",
+        metavar="LABEL",
+        help=(
+            "Record a fingerprint over time: sample WiFi every --session-interval "
+            "for --session-duration seconds, aggregate mean/std per AP, then store"
+        ),
+    )
+    fp.add_argument(
+        "--session-duration",
+        type=float,
+        default=45.0,
+        metavar="SEC",
+        help="Seconds to sample for --record-fingerprint-session (default: 45)",
+    )
+    fp.add_argument(
+        "--session-interval",
+        type=float,
+        default=1.0,
+        metavar="SEC",
+        help="Pause between samples during --record-fingerprint-session (default: 1)",
+    )
+    fp.add_argument(
+        "--min-samples",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Minimum scans required before stop_fingerprint_recording (default: 5)",
+    )
+    fp.add_argument(
+        "--start-fingerprint-recording",
+        metavar="LABEL",
+        help=(
+            "Begin an in-process recording session (pair with --stop-fingerprint-recording "
+            "in the same long-running module; use --record-fingerprint-session for CLI)"
+        ),
+    )
+    fp.add_argument(
+        "--stop-fingerprint-recording",
+        action="store_true",
+        help="Finalize the active in-process recording session and store to SQLite",
+    )
+    fp.add_argument(
+        "--fingerprint-recording-status",
+        action="store_true",
+        help="Show whether a recording session is active and how many samples were collected",
+    )
+    fp.add_argument(
+        "--cancel-fingerprint-recording",
+        action="store_true",
+        help="Discard the active recording session without saving",
+    )
+    fp.add_argument(
         "--distance-to-ap",
         action="append",
         metavar="AP:M",
@@ -807,8 +990,15 @@ def main() -> int:
         parser.error("--scans must be >= 1")
     if args.record_fingerprint_here and not args.at:
         parser.error('--record-fingerprint-here requires --at "X,Y" (meters)')
-    if args.at and not args.record_fingerprint_here:
-        parser.error("--at only applies to --record-fingerprint-here")
+    if args.at and not (
+        args.record_fingerprint_here
+        or args.record_fingerprint_session
+        or args.start_fingerprint_recording
+    ):
+        parser.error(
+            "--at applies to --record-fingerprint-here, --record-fingerprint-session, "
+            "or --start-fingerprint-recording"
+        )
     if args.at:
         try:
             parse_at_coordinates(args.at)
@@ -825,13 +1015,34 @@ def main() -> int:
     if args.set_device_z_m is not None:
         _DEVICE_Z_M = float(args.set_device_z_m)
 
-    if args.distance_to_ap and not args.record_fingerprint_rssi:
-        parser.error("--distance-to-ap only applies to --record-fingerprint-rssi")
+    session_labels = (
+        args.record_fingerprint_rssi,
+        args.record_fingerprint_session,
+        args.start_fingerprint_recording,
+    )
+    if args.distance_to_ap and not any(session_labels):
+        parser.error(
+            "--distance-to-ap applies to --record-fingerprint-rssi, "
+            "--record-fingerprint-session, or --start-fingerprint-recording"
+        )
+    if args.at and not (args.record_fingerprint_here or args.record_fingerprint_session):
+        parser.error(
+            '--at applies to --record-fingerprint-here or --record-fingerprint-session'
+        )
+    if args.record_fingerprint_session and args.session_duration <= 0:
+        parser.error("--session-duration must be > 0")
+    if args.min_samples < 1:
+        parser.error("--min-samples must be >= 1")
 
     fp_actions = (
         args.record_fingerprint
         or args.record_fingerprint_here
         or args.record_fingerprint_rssi
+        or args.record_fingerprint_session
+        or args.start_fingerprint_recording
+        or args.stop_fingerprint_recording
+        or args.fingerprint_recording_status
+        or args.cancel_fingerprint_recording
         or args.list_fingerprints
         or args.delete_fingerprint
         or args.clear_fingerprints

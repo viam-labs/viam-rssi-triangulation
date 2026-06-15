@@ -150,6 +150,11 @@ Every request must include a **`command`** string. All responses include **`ok`*
 | `record_fingerprint` | Scan WiFi and store a fingerprint at a configured AP’s floor-plan position |
 | `record_fingerprint_here` | Scan and store at explicit coordinates (same frame as `get_readings`) |
 | `record_fingerprint_rssi` | Scan and store RSSI only (no floor x/y); optional measured distance(s) to AP(s) for calibration |
+| `start_fingerprint_recording` | Begin accumulating scans at a spot (pair with `stop_fingerprint_recording`) |
+| `sample_fingerprint_recording` | Add one WiFi scan to the active session |
+| `fingerprint_recording_status` | Sample count and session metadata |
+| `stop_fingerprint_recording` | Aggregate samples (mean + std per AP) and store to SQLite |
+| `cancel_fingerprint_recording` | Discard the active session without saving |
 | `list_fingerprints` | List all stored fingerprints |
 | `delete_fingerprint` | Remove one fingerprint by label |
 | `clear_fingerprints` | Remove all fingerprints |
@@ -180,6 +185,31 @@ Response: `{ "ok": true, "command": "set_device_z_m", "z_m": 1.2 }`.
 `ap_name` must match `access_points[].name` exactly. Optional: **`scan_count`** (overrides component `scan_count` for this scan only).
 
 **`record_fingerprint_rssi`** — RSSI at a named spot without floor-plan coordinates. Optional laser/rangefinder distances improve path-loss calibration and, with a single range, enable approximate x/y blending at runtime via the geometry prior.
+
+**Timed / walk-around recording (`start` / `stop`)** — stand at a desk (or walk slowly through a zone) and collect **many scans** instead of one snapshot. Each `get_readings()` call while a session is active appends a sample (`auto_sample: true` by default). On `stop_fingerprint_recording`, the module stores **mean RSSI per AP** (used for matching) plus **`rssi_stats_by_ap`** (`mean_dbm`, `std_dbm`, `n`) for future confidence weighting.
+
+```json
+{ "command": "start_fingerprint_recording", "label": "Desk - Matt Vella",
+  "distance_to_ap": [{ "ap_name": "SoA1", "distance_m": 7.58 }],
+  "min_samples": 10 }
+```
+
+Keep the device still and call `get_readings()` every second for ~30–60s (or run `test_scan_rssi.py --interval 1` on the same machine). Then:
+
+```json
+{ "command": "stop_fingerprint_recording" }
+```
+
+CLI one-shot (start → sample every second → stop in one process):
+
+```bash
+sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
+  --record-fingerprint-session "Desk - Matt Vella" \
+  --distance-to-ap "SoA1:7.58" --session-duration 45 --min-samples 10 \
+  --scan-mode thorough
+```
+
+Check progress: `{ "command": "fingerprint_recording_status" }`. Abort: `{ "command": "cancel_fingerprint_recording" }`.
 
 ```json
 {

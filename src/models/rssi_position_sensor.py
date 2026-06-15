@@ -24,6 +24,7 @@ from viam.utils import SensorReading, ValueTypes
 from rssi_triangulation.calibrate import try_periodic_path_loss_calibration
 from rssi_triangulation.fingerprint import FingerprintStore
 from rssi_triangulation.fingerprint_commands import execute_fingerprint_command
+from rssi_triangulation.fingerprint_session import get_fingerprint_session_manager
 from rssi_triangulation.fusion import (
     MotionDelta,
     PositionFilter,
@@ -588,6 +589,7 @@ class RssiPositionSensor(Sensor, EasyResource):
             strict_mac=self._strict_mac,
             min_sample_count=self._min_samples_per_ap or (2 if scans >= 3 else 1),
         )
+        get_fingerprint_session_manager().ingest_matched(matched)
 
         motion_detail = ""
         if self._position_filter is not None:
