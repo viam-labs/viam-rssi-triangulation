@@ -15,6 +15,8 @@ from .locate import (
     estimate_fingerprint_position,
     fingerprint_match_as_dict,
     fingerprint_rankings_from_matched,
+    geometric_centroid_xy,
+    infer_fingerprint_xy_at_record,
 )
 from .module_config import LocatorConfig
 
@@ -152,6 +154,7 @@ def execute_fingerprint_command(
             min_samples_per_ap=min_samples_per_ap,
             scan_count_override=scan_count_override,
             fast_scan=fast_scan,
+            device_z_m=device_z_m,
         )
 
     if name == "stop_fingerprint_recording":
@@ -304,10 +307,12 @@ def _sample_fingerprint_recording(
     min_samples_per_ap: int | None,
     scan_count_override: int | None,
     fast_scan: bool,
+    device_z_m: float | None = None,
 ) -> dict[str, Any]:
     manager = get_fingerprint_session_manager()
     if not manager.active():
         raise RuntimeError("no active fingerprint recording session")
+    effective_scans = scan_count_override if scan_count_override is not None else config.scan_count
     matched, backend_name, _aggregated, scans_done = collect_matched_scan(
         config,
         interface=interface,
@@ -316,10 +321,19 @@ def _sample_fingerprint_recording(
         blocking=blocking,
         strict_mac=strict_mac,
         min_samples_per_ap=min_samples_per_ap,
-        scan_count_override=scan_count_override or 1,
+        scan_count_override=effective_scans,
         fast_scan=fast_scan,
     )
-    count = manager.add_sample(matched_to_rssi_dict(matched))
+    prior_xy = geometric_centroid_xy(
+        config,
+        matched,
+        device_z_m=device_z_m,
+        min_anchors=2,
+    )
+    count = manager.add_sample(
+        matched_to_rssi_dict(matched),
+        prior_xy=prior_xy,
+    )
     return {
         "ok": True,
         "command": "sample_fingerprint_recording",
@@ -407,6 +421,16 @@ def _stop_fingerprint_recording(
     if x_m is not None and y_m is not None:
         x_out, y_out = x_m, y_m
         positioned = True
+    elif not positioned and distances:
+        frozen = infer_fingerprint_xy_at_record(
+            config,
+            distances_by_ap=distances,
+            prior_xy_samples=session.prior_xy_samples,
+            device_z_m=effective_z,
+        )
+        if frozen is not None:
+            x_out, y_out = frozen
+            positioned = True
 
     record = db.record(
         session.label or "",
@@ -431,6 +455,8 @@ def _stop_fingerprint_recording(
         "ap_rssi": record.rssi_by_ap,
         "rssi_stats_by_ap": record.rssi_stats_by_ap or {},
         "sample_count": len(session.samples),
+        "prior_xy_samples": len(session.prior_xy_samples),
+        "position_frozen_at_record": positioned and x_m is None and y_m is None,
         "db_path": str(db.path),
         "recorded_at": record.recorded_at,
     }

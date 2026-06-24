@@ -57,11 +57,19 @@ class FingerprintRecordingSession:
     min_samples: int = 5
     auto_sample: bool = True
     samples: list[dict[str, float]] = field(default_factory=list)
+    prior_xy_samples: list[tuple[float, float]] = field(default_factory=list)
 
-    def add_sample(self, rssi_by_ap: dict[str, float]) -> None:
+    def add_sample(
+        self,
+        rssi_by_ap: dict[str, float],
+        *,
+        prior_xy: tuple[float, float] | None = None,
+    ) -> None:
         if not rssi_by_ap:
             return
         self.samples.append(dict(rssi_by_ap))
+        if prior_xy is not None:
+            self.prior_xy_samples.append(prior_xy)
 
     def status(self) -> dict[str, Any]:
         return {
@@ -140,15 +148,23 @@ class FingerprintSessionManager:
                 "discarded_samples": discarded,
             }
 
-    def add_sample(self, rssi_by_ap: dict[str, float]) -> int:
+    def add_sample(
+        self,
+        rssi_by_ap: dict[str, float],
+        *,
+        prior_xy: tuple[float, float] | None = None,
+    ) -> int:
         with self._lock:
             if self._session is None:
                 return 0
-            self._session.add_sample(rssi_by_ap)
+            self._session.add_sample(rssi_by_ap, prior_xy=prior_xy)
             return len(self._session.samples)
 
     def ingest_matched(
-        self, matched: list[tuple[str, float, float | None]]
+        self,
+        matched: list[tuple[str, float, float | None]],
+        *,
+        prior_xy: tuple[float, float] | None = None,
     ) -> int:
         from .fingerprint import matched_to_rssi_dict
 
@@ -156,7 +172,10 @@ class FingerprintSessionManager:
             session = self._session
             if session is None or not session.auto_sample:
                 return 0
-        return self.add_sample(matched_to_rssi_dict(matched))
+        return self.add_sample(
+            matched_to_rssi_dict(matched),
+            prior_xy=prior_xy,
+        )
 
     def stop(
         self,

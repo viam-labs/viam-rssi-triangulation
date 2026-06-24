@@ -161,7 +161,23 @@ def test_normalized_matching_ignores_absolute_offset() -> None:
     dist, common = rssi_vector_rms_db(a, b, normalize=True, min_common_aps=3)
     assert dist == pytest.approx(0.0, abs=0.01)
     assert common == 3
-    assert normalize_rssi_vector(a) == normalize_rssi_vector(b)
+
+
+def test_peak_flip_makes_neighboring_desks_ambiguous() -> None:
+    """When 6G multipath inverts secondary AP strength, k-NN can favor the wrong desk."""
+    matt = {"SoA1": -56.0, "NoE4": -67.0, "EoF3": -73.0}
+    evan = {"SoA1": -58.0, "NoE4": -72.0, "EoF3": -77.0}
+    live_at_evan = {"SoA1": -57.0, "NoE4": -58.0, "EoF3": -77.0}
+
+    matt_rms, _ = rssi_vector_rms_db(
+        live_at_evan, matt, normalize=True, min_common_aps=2, anchor="SoA1"
+    )
+    evan_rms, _ = rssi_vector_rms_db(
+        live_at_evan, evan, normalize=True, min_common_aps=2, anchor="SoA1"
+    )
+    # Outlier scan: wrong desk wins; margin is small → low confidence via runner-up.
+    assert matt_rms < evan_rms
+    assert evan_rms - matt_rms < 3.0
 
 
 def test_min_common_fraction_blocks_weak_overlap(tmp_path) -> None:
@@ -259,6 +275,23 @@ def test_fingerprint_confidence_zero_beyond_max_rms() -> None:
     assert fingerprint_confidence(fp, max_rms_db=10.0) == 0.0
 
 
+def test_fingerprint_confidence_penalizes_close_runner_up() -> None:
+    fp = FingerprintMatch(
+        x_m=0.0,
+        y_m=0.0,
+        z_m=0.0,
+        label="matt",
+        distance_db=6.0,
+        common_aps=3,
+        k=2,
+        neighbors=("matt", "evan"),
+        runner_up_rms_db=7.5,
+    )
+    tight = fingerprint_confidence(fp, max_rms_db=10.0, runner_up_rms_db=12.0)
+    ambiguous = fingerprint_confidence(fp, max_rms_db=10.0, runner_up_rms_db=7.5)
+    assert ambiguous < tight
+
+
 def test_estimate_fingerprint_position_helper(tmp_path) -> None:
     db = FingerprintStore(tmp_path / "fp.sqlite")
     db.record(
@@ -276,6 +309,38 @@ def test_estimate_fingerprint_position_helper(tmp_path) -> None:
     assert est is not None
     assert est.x_m == 12.0
     assert est.y_m == 34.0
+
+
+def test_estimate_fingerprint_position_populates_runner_up_with_k1(tmp_path) -> None:
+    db = FingerprintStore(tmp_path / "fp.sqlite")
+    db.record(
+        "best",
+        x_m=0.0,
+        y_m=0.0,
+        rssi_by_ap={"a": -55.0, "b": -70.0, "c": -75.0},
+        scan_count=1,
+    )
+    db.record(
+        "runner",
+        x_m=1.0,
+        y_m=1.0,
+        rssi_by_ap={"a": -58.0, "b": -71.0, "c": -74.0},
+        scan_count=1,
+    )
+    matched = [("a", -55.5, None), ("b", -69.5, None), ("c", -75.5, None)]
+    est = estimate_fingerprint_position(
+        db,
+        matched,
+        k=1,
+        min_common_aps=3,
+        min_common_fraction=0.0,
+        max_rms_db=20.0,
+    )
+    assert est is not None
+    assert est.k == 1
+    assert est.neighbors == ("best",)
+    assert est.runner_up_rms_db is not None
+    assert est.runner_up_rms_db > est.distance_db
 
 
 def test_unpositioned_single_range_resolves_with_prior(

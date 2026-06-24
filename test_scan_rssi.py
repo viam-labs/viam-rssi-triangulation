@@ -12,6 +12,7 @@ Fingerprint calibration (stand under each AP, or at any named spot):
   sudo python3 test_scan_rssi.py --record-fingerprint-here "Jane Smith's Desk" --at "12.0,5.5"
   sudo python3 test_scan_rssi.py --record-fingerprint-rssi "Matt Desk" --distance-to-ap "SoA1:8.3"
   sudo python3 test_scan_rssi.py --list-fingerprints
+  sudo python3 test_scan_rssi.py --goto "Matt Desk" --interval 2
 """
 
 from __future__ import annotations
@@ -33,15 +34,20 @@ from rssi_triangulation.fingerprint_commands import (
     default_fingerprint_db_path,
     execute_fingerprint_command,
 )
+from rssi_triangulation.fingerprint_session import get_fingerprint_session_manager
 from rssi_triangulation.fingerprint import FingerprintMatch
 from rssi_triangulation.locate import (
+    GotoGuidance,
     PositionReading,
     build_readings_dict,
+    compute_goto_guidance,
     estimate_from_matched,
     fingerprint_match_as_dict,
     fingerprint_rankings_from_matched,
+    goto_guidance_as_dict,
     locate_position,
     match_readings_to_aps,
+    resolve_goto_target,
     smooth_position,
 )
 from rssi_triangulation.module_config import (
@@ -167,6 +173,7 @@ def format_report(
     method_used: str,
     fp_match: FingerprintMatch | None = None,
     elapsed_s: float | None = None,
+    goto: GotoGuidance | None = None,
 ) -> str:
     lines = [
         f"SSID: {config.scan_ssid!r}  scans: {scans}",
@@ -198,6 +205,18 @@ def format_report(
             f"  z: {position['location']['z']:.2f} m",
         ]
     )
+    if goto is not None:
+        status = "Arrived" if goto.arrived else "Go to"
+        lines.extend(
+            [
+                "",
+                f"{status} {goto.label!r}:",
+                f"  target: x={goto.target_x_m:.2f} y={goto.target_y_m:.2f} m",
+                f"  offset: Δx={goto.dx_m:+.2f} Δy={goto.dy_m:+.2f} m "
+                f"({goto.distance_m:.2f} m, bearing {goto.bearing_deg:.0f}° from +y)",
+                f"  {goto.hint}",
+            ]
+        )
     aps = position.get("access_points") or []
     if aps:
         lines.extend(
@@ -292,7 +311,12 @@ def run_fingerprint_session_recording(
     )
     deadline = monotonic() + args.session_duration
     interval = max(args.session_interval, 0.2)
-    while monotonic() < deadline:
+    min_samples = args.min_samples
+    after_deadline_no_progress = 0
+    last_sample_count = 0
+    while monotonic() < deadline or get_fingerprint_session_manager().status().get(
+        "sample_count", 0
+    ) < min_samples:
         execute_fingerprint_command(
             {"command": "sample_fingerprint_recording"},
             config=config,
@@ -303,8 +327,22 @@ def run_fingerprint_session_recording(
             blocking=effective_blocking(args),
             strict_mac=args.strict_mac,
             min_samples_per_ap=args.min_samples_per_ap,
+            scan_count_override=args.scans or config.scan_count,
+            device_z_m=effective_device_z_m(config),
             fast_scan=effective_fast_scan(args),
         )
+        sample_count = get_fingerprint_session_manager().status().get("sample_count", 0)
+        if sample_count >= min_samples and monotonic() >= deadline:
+            break
+        if monotonic() >= deadline and sample_count < min_samples:
+            if sample_count <= last_sample_count:
+                after_deadline_no_progress += 1
+            else:
+                after_deadline_no_progress = 0
+            # Avoid hanging forever when scans continue to produce no usable samples.
+            if after_deadline_no_progress >= 3:
+                break
+        last_sample_count = sample_count
         time.sleep(interval)
     return execute_fingerprint_command(
         {"command": "stop_fingerprint_recording"},
@@ -644,6 +682,17 @@ def run_once(args: argparse.Namespace) -> int:
         fingerprint_rankings=rankings,
     )
     raw_payload = build_readings_dict(raw_position, matched, config)
+    goto: GotoGuidance | None = None
+    if args.goto:
+        target = resolve_goto_target(fp_store, args.goto)
+        goto = compute_goto_guidance(
+            label=target.label,
+            current=position,
+            target_x_m=target.x_m,
+            target_y_m=target.y_m,
+            target_z_m=target.z_m,
+            arrival_radius_m=args.goto_arrival_m,
+        )
 
     if args.json:
         out: dict = {
@@ -661,6 +710,8 @@ def run_once(args: argparse.Namespace) -> int:
             "readings": payload,
             "elapsed_s": round(elapsed_s, 3),
         }
+        if goto is not None:
+            out["goto"] = goto_guidance_as_dict(goto)
         if args.debug:
             out["raw_readings"] = raw_payload
             out["heard"] = [asdict(r) for r in readings]
@@ -682,6 +733,7 @@ def run_once(args: argparse.Namespace) -> int:
                 method_used=method_used,
                 fp_match=fp_match,
                 elapsed_s=elapsed_s,
+                goto=goto,
             )
         )
     return 0
@@ -984,6 +1036,21 @@ def main() -> int:
         metavar="W",
         help="Max fingerprint weight 0–1 when blending with the centroid (default: 0.5; 0 = geometry only)",
     )
+    fp.add_argument(
+        "--goto",
+        metavar="LABEL",
+        help=(
+            "Navigate toward a positioned fingerprint label; each reading prints "
+            "Δx/Δy offset and distance to that target"
+        ),
+    )
+    fp.add_argument(
+        "--goto-arrival-m",
+        type=float,
+        default=1.0,
+        metavar="M",
+        help="Distance considered 'arrived' for --goto (default: 1.0)",
+    )
     args = parser.parse_args()
 
     if args.scans is not None and args.scans < 1:
@@ -1033,6 +1100,13 @@ def main() -> int:
         parser.error("--session-duration must be > 0")
     if args.min_samples < 1:
         parser.error("--min-samples must be >= 1")
+    if args.goto_arrival_m <= 0:
+        parser.error("--goto-arrival-m must be > 0")
+    if args.goto:
+        try:
+            resolve_goto_target(fingerprint_db(args), args.goto)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     fp_actions = (
         args.record_fingerprint
@@ -1117,10 +1191,16 @@ def main() -> int:
             if background_scan
             else "  (--interval is not the scan period; one cycle is ~3× WiFi scan time)\n"
         )
+        goto_line = (
+            f"  goto={args.goto!r} arrival≤{args.goto_arrival_m:g} m\n"
+            if args.goto
+            else ""
+        )
         print(
             f"Scanning every {args.interval}s after each cycle completes ({args.config})\n"
             f"  scan_mode={args.scan_mode} scans={args.scans or 'from config'} "
             f"fingerprints={db_path}\n"
+            f"{goto_line}"
             f"{cycle_note}"
             f"  Ctrl+C to stop\n"
         )

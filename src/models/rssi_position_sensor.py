@@ -36,6 +36,7 @@ from rssi_triangulation.locate import (
     build_readings_dict,
     estimate_from_matched,
     fingerprint_rankings_from_matched,
+    geometric_centroid_xy,
     locate_position,
     match_readings_to_aps,
     smooth_position,
@@ -589,7 +590,20 @@ class RssiPositionSensor(Sensor, EasyResource):
             strict_mac=self._strict_mac,
             min_sample_count=self._min_samples_per_ap or (2 if scans >= 3 else 1),
         )
-        get_fingerprint_session_manager().ingest_matched(matched)
+        get_fingerprint_session_manager().ingest_matched(
+            matched,
+            prior_xy=geometric_centroid_xy(
+                self._config,
+                matched,
+                device_z_m=self._device_z_m,
+                min_anchors=2,
+                max_rssi_delta_db=self._max_rssi_delta_db,
+                min_rssi_dbm=self._min_rssi_dbm,
+                tx_power_dbm=self._tx_power_dbm,
+                path_loss_n=self._path_loss_n,
+                weight_temperature=self._weight_temperature,
+            ),
+        )
 
         motion_detail = ""
         if self._position_filter is not None:

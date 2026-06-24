@@ -54,6 +54,119 @@ class PositionReading:
         return PositionReading(x_m=self.x_m, y_m=self.y_m, z_m=z_m)
 
 
+@dataclass(frozen=True)
+class GotoGuidance:
+    """Vector from a live position to a stored fingerprint target."""
+
+    label: str
+    target_x_m: float
+    target_y_m: float
+    target_z_m: float
+    current_x_m: float
+    current_y_m: float
+    dx_m: float
+    dy_m: float
+    distance_m: float
+    bearing_deg: float
+    arrival_radius_m: float
+    arrived: bool
+    hint: str
+
+
+def resolve_goto_target(store: FingerprintStore, label: str) -> FingerprintRecord:
+    """Return a positioned fingerprint by exact label for navigation."""
+    for record in store.list_all():
+        if record.label == label:
+            if not record.positioned:
+                raise ValueError(
+                    f"fingerprint {label!r} has no floor coordinates "
+                    f"(positioned=false). Re-record with --record-fingerprint-here "
+                    f'--at "X,Y", or use --record-fingerprint-session with '
+                    f"distance_to_ap so x/y freeze at record time."
+                )
+            return record
+    known = [r.label for r in store.list_all()]
+    if known:
+        raise ValueError(
+            f"no fingerprint with label {label!r}; known labels: {', '.join(known)}"
+        )
+    raise ValueError(
+        f"no fingerprint with label {label!r} (fingerprint DB is empty)"
+    )
+
+
+def _goto_hint(dx_m: float, dy_m: float, *, arrived: bool, arrival_radius_m: float) -> str:
+    if arrived:
+        return f"within {arrival_radius_m:g} m of target"
+    parts: list[str] = []
+    if dy_m > 0.3:
+        parts.append(f"+y {dy_m:.1f} m")
+    elif dy_m < -0.3:
+        parts.append(f"-y {abs(dy_m):.1f} m")
+    if dx_m > 0.3:
+        parts.append(f"+x {dx_m:.1f} m")
+    elif dx_m < -0.3:
+        parts.append(f"-x {abs(dx_m):.1f} m")
+    if not parts:
+        return f"{math.hypot(dx_m, dy_m):.1f} m away"
+    return ", then ".join(parts)
+
+
+def compute_goto_guidance(
+    *,
+    label: str,
+    current: PositionReading,
+    target_x_m: float,
+    target_y_m: float,
+    target_z_m: float = 0.0,
+    arrival_radius_m: float = 1.0,
+) -> GotoGuidance:
+    """Floor-plan offset from ``current`` to a fingerprint target."""
+    if arrival_radius_m <= 0:
+        raise ValueError("arrival_radius_m must be > 0")
+    dx_m = target_x_m - current.x_m
+    dy_m = target_y_m - current.y_m
+    distance_m = math.hypot(dx_m, dy_m)
+    bearing_deg = (
+        math.degrees(math.atan2(dx_m, dy_m)) % 360.0 if distance_m > 0 else 0.0
+    )
+    arrived = distance_m <= arrival_radius_m
+    return GotoGuidance(
+        label=label,
+        target_x_m=target_x_m,
+        target_y_m=target_y_m,
+        target_z_m=target_z_m,
+        current_x_m=current.x_m,
+        current_y_m=current.y_m,
+        dx_m=dx_m,
+        dy_m=dy_m,
+        distance_m=distance_m,
+        bearing_deg=bearing_deg,
+        arrival_radius_m=arrival_radius_m,
+        arrived=arrived,
+        hint=_goto_hint(dx_m, dy_m, arrived=arrived, arrival_radius_m=arrival_radius_m),
+    )
+
+
+def goto_guidance_as_dict(guidance: GotoGuidance) -> dict:
+    return {
+        "label": guidance.label,
+        "target": {
+            "x": guidance.target_x_m,
+            "y": guidance.target_y_m,
+            "z": guidance.target_z_m,
+            "unit": "meters",
+        },
+        "delta_m": {"x": guidance.dx_m, "y": guidance.dy_m, "unit": "meters"},
+        "distance_m": guidance.distance_m,
+        "bearing_deg": guidance.bearing_deg,
+        "bearing_from": "+y",
+        "arrival_radius_m": guidance.arrival_radius_m,
+        "arrived": guidance.arrived,
+        "hint": guidance.hint,
+    }
+
+
 def access_points_relative_to_position(
     position: PositionReading,
     matched: list[tuple[str, float, float | None]],
@@ -175,6 +288,54 @@ def effective_fingerprint_position(
     if record.positioned:
         return record.x_m, record.y_m, record.z_m, True, "stored"
     return 0.0, 0.0, device_z_m, False, None
+
+
+def infer_fingerprint_xy_at_record(
+    config: LocatorConfig,
+    *,
+    distances_by_ap: dict[str, float],
+    prior_xy_samples: list[tuple[float, float]],
+    device_z_m: float,
+) -> tuple[float, float] | None:
+    """Freeze desk (x, y) at record time from mean geometry + laser distance(s)."""
+    if not distances_by_ap or not prior_xy_samples:
+        return None
+    prior_x = sum(p[0] for p in prior_xy_samples) / len(prior_xy_samples)
+    prior_y = sum(p[1] for p in prior_xy_samples) / len(prior_xy_samples)
+    if len(distances_by_ap) >= 2:
+        try:
+            ap_ranges = {
+                ap_name: (*ap_position_in_reading_frame(config, ap_name), slant)
+                for ap_name, slant in distances_by_ap.items()
+            }
+            xy = infer_xy_from_slant_distances(
+                ap_ranges,
+                device_z_m=device_z_m,
+                config=config,
+                min_horizontal_m=MIN_SAMPLE_DISTANCE_M,
+            )
+            if xy is not None:
+                return xy
+        except ValueError:
+            pass
+    if len(distances_by_ap) == 1:
+        ap_name, slant = next(iter(distances_by_ap.items()))
+        try:
+            ax, ay, az = ap_position_in_reading_frame(config, ap_name)
+            return infer_xy_from_single_slant_with_prior(
+                ax,
+                ay,
+                az,
+                slant,
+                device_z_m=device_z_m,
+                prior_x=prior_x,
+                prior_y=prior_y,
+                config=config,
+                min_horizontal_m=MIN_SAMPLE_DISTANCE_M,
+            )
+        except ValueError:
+            return None
+    return None
 
 
 def geometric_centroid_xy(
@@ -473,17 +634,20 @@ def estimate_fingerprint_position(
     rssi_by_ap = matched_to_rssi_dict(matched)
     if not rssi_by_ap:
         return None
-    top = store.rank_matches(
+    rank_k = max(2, k)
+    ranked = store.rank_matches(
         rssi_by_ap,
-        k=k,
+        k=rank_k,
         min_common_aps=min_common_aps,
         min_common_fraction=min_common_fraction,
         max_rms_db=max_rms_db,
     )
-    if not top:
+    if not ranked:
         return None
 
+    top = ranked[: max(1, k)]
     best_dist, best_common, best_fp = top[0]
+    runner_up_rms = ranked[1][0] if len(ranked) > 1 else None
     if device_z_m is not None:
         effective_z = device_z_m
     elif config is not None:
@@ -530,6 +694,7 @@ def estimate_fingerprint_position(
             neighbors=tuple(fp.label for _, _, fp in top),
             positioned=True,
             position_method=best_method,
+            runner_up_rms_db=runner_up_rms,
         )
 
     return FingerprintMatch(
@@ -543,6 +708,7 @@ def estimate_fingerprint_position(
         neighbors=tuple(fp.label for _, _, fp in top),
         positioned=False,
         position_method=None,
+        runner_up_rms_db=runner_up_rms,
     )
 
 
@@ -602,6 +768,7 @@ def fingerprint_confidence(
     *,
     max_rms_db: float | None = 10.0,
     min_common_aps: int = 3,
+    runner_up_rms_db: float | None = None,
 ) -> float:
     """
     How much to trust a fingerprint match when blending (0 = ignore, 1 = full weight).
@@ -617,7 +784,12 @@ def fingerprint_confidence(
     else:
         rms_factor = 1.0 / (1.0 + match.distance_db)
     ap_factor = min(1.0, match.common_aps / max(min_common_aps, 1))
-    return max(0.0, min(1.0, rms_factor * ap_factor))
+    confidence = max(0.0, min(1.0, rms_factor * ap_factor))
+    if runner_up_rms_db is not None and math.isfinite(runner_up_rms_db):
+        margin = runner_up_rms_db - match.distance_db
+        if margin < 3.0:
+            confidence *= max(0.0, margin / 3.0)
+    return confidence
 
 
 def range_prior_blend_factor(
@@ -660,6 +832,7 @@ def blend_fingerprint_with_centroid(
             fp_match,
             max_rms_db=max_rms_db,
             min_common_aps=min_common_aps,
+            runner_up_rms_db=fp_match.runner_up_rms_db,
         )
         if fp_match.position_method == "range_prior":
             weight *= range_prior_blend_factor(
@@ -684,6 +857,7 @@ def blend_fingerprint_with_centroid(
         blend_weight=weight,
         positioned=fp_match.positioned,
         position_method=fp_match.position_method,
+        runner_up_rms_db=fp_match.runner_up_rms_db,
     )
     return blended, annotated
 

@@ -39,6 +39,7 @@ class FingerprintMatch:
     blend_weight: float = 0.0
     positioned: bool = True
     position_method: str | None = None
+    runner_up_rms_db: float | None = None
 
 
 def matched_to_rssi_dict(
@@ -79,17 +80,17 @@ def rssi_vector_rms_db(
     normalize: bool = True,
     min_common_aps: int = 1,
     min_common_fraction: float = 0.0,
+    anchor: str | None = None,
 ) -> tuple[float, int]:
     """
     RMS RSSI difference over AP names present in both vectors.
 
-    When ``normalize`` is true (default), vectors are converted to relative RSSI
-    before comparison so a match reflects which APs are stronger/weaker, not
-    overall signal level (which varies scan-to-scan).
+    When ``normalize`` is true (default), vectors are compared relative to a
+    shared anchor AP in the overlap (``anchor``), or else the strongest AP in
+    the reference fingerprint ``b``. Anchoring to the stored fingerprint's
+    dominant AP avoids mis-matches when scan noise briefly makes a secondary
+    AP the live peak.
     """
-    if normalize:
-        a = normalize_rssi_vector(a)
-        b = normalize_rssi_vector(b)
     common = set(a) & set(b)
     required = required_common_ap_count(
         a,
@@ -99,7 +100,17 @@ def rssi_vector_rms_db(
     )
     if len(common) < required:
         return float("inf"), len(common)
-    err = sum((a[k] - b[k]) ** 2 for k in common) / len(common)
+    if normalize:
+        if anchor is not None and anchor in common:
+            anchor_ap = anchor
+        else:
+            anchor_ap = max(common, key=lambda k: b[k])
+        a_cmp = {k: a[k] - a[anchor_ap] for k in common}
+        b_cmp = {k: b[k] - b[anchor_ap] for k in common}
+    else:
+        a_cmp = {k: a[k] for k in common}
+        b_cmp = {k: b[k] for k in common}
+    err = sum((a_cmp[k] - b_cmp[k]) ** 2 for k in common) / len(common)
     return math.sqrt(err), len(common)
 
 
@@ -313,12 +324,16 @@ class FingerprintStore:
         k = max(1, k)
         candidates: list[tuple[float, int, FingerprintRecord]] = []
         for fp in self.list_all():
+            anchor: str | None = None
+            if fp.distances_by_ap and len(fp.distances_by_ap) == 1:
+                anchor = next(iter(fp.distances_by_ap))
             dist, common = rssi_vector_rms_db(
                 rssi_by_ap,
                 fp.rssi_by_ap,
                 normalize=normalize,
                 min_common_aps=min_common_aps,
                 min_common_fraction=min_common_fraction,
+                anchor=anchor,
             )
             if not math.isfinite(dist):
                 continue

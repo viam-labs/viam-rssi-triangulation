@@ -629,6 +629,16 @@ Then localize — fingerprints blend in automatically once the DB has entries (t
 sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json --interval 2
 ```
 
+**Navigate to a fingerprint** (target must have floor `x`/`y` — `positioned: true` in `--list-fingerprints`):
+
+```bash
+sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
+  --fingerprint-db examples/fingerprints.sqlite \
+  --goto "Matt Desk" --interval 2
+```
+
+Each cycle prints `Δx` / `Δy` offset, distance, and bearing (0° = toward +y on your floor plan). Use `--goto-arrival-m 1.5` to widen the “arrived” radius. With `--json`, see the `goto` object.
+
 Tune the blend with `--fingerprint-max-blend` (0 = geometry only, 1 = full fingerprint pull at max confidence).
 
 **Speed:** fingerprint blending does not add extra WiFi scans. With `--interval`, [background scanning](#continuous-background-scanning-mobile-robots) is on by default and each cycle is near-instant (it reads the rolling window). With `--no-background-scan` (or one-shot runs), each reading blocks on `scan_count` full scans (often **~2s each** on a Pi with `iw`, or longer if `iw` retries “device busy” then falls back to `wpa_cli`) — so `--scans 3` is often **~6–7s per cycle**, and `--interval 0.2` only sleeps 0.2s *after* that work finishes.

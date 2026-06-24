@@ -42,6 +42,10 @@ def test_fingerprint_recording_session_start_stop(
         "rssi_triangulation.fingerprint_commands.collect_matched_scan",
         lambda *a, **k: fake_scan(),
     )
+    monkeypatch.setattr(
+        "rssi_triangulation.fingerprint_commands.geometric_centroid_xy",
+        lambda *a, **k: (1.0, 2.0),
+    )
     config = parse_config_dict(sample_config_dict)
     db_path = tmp_path / "fp.sqlite"
 
@@ -55,6 +59,7 @@ def test_fingerprint_recording_session_start_stop(
             "label": "desk",
             "min_samples": 3,
             "auto_sample": False,
+            "distance_to_ap": [{"ap_name": "AP-A", "distance_m": 8.0}],
         },
         config=config,
         db=db,
@@ -72,10 +77,13 @@ def test_fingerprint_recording_session_start_stop(
         {"command": "stop_fingerprint_recording"},
         config=config,
         db=db,
+        device_z_m=0.0,
     )
     assert stop["ok"] is True
     assert stop["label"] == "desk"
     assert stop["sample_count"] == 3
+    assert stop["positioned"] is True
+    assert stop["position_frozen_at_record"] is True
     assert "AP-A" in stop["rssi_stats_by_ap"]
     assert stop["rssi_stats_by_ap"]["AP-A"]["n"] == 3.0
 
