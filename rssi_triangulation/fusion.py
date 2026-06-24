@@ -1,10 +1,13 @@
-"""Fuse noisy WiFi position fixes with robot motion.
+"""Fuse noisy WiFi/BLE position fixes with robot motion.
 
-A WiFi RSSI fix is a noisy, biased absolute position. A mobile robot also has
-motion sources (a movement sensor, a base, a SLAM service) that are smooth and
-locally accurate but drift. This module provides an adaptive per-axis Kalman
-filter that predicts from motion between fixes and corrects with each WiFi fix,
-plus small pure helpers for turning Viam motion readings into a ``MotionDelta``.
+A WiFi or BLE RSSI fix is a noisy, biased absolute position. A mobile robot
+also has motion sources (a movement sensor, a base, a SLAM service) that are
+smooth and locally accurate but drift. This module provides a 4-state Extended
+Kalman Filter (EKF) that predicts from IMU/motion between fixes and corrects
+with each WiFi or BLE fix, plus small pure helpers for turning Viam motion
+readings into a ``MotionDelta``.
+
+State vector: ``[x, y, vx, vy]`` with a full 4×4 covariance matrix.
 
 Everything here is pure Python (no numpy, no Viam imports) so it stays unit
 testable; the Viam client calls live in the sensor model.
@@ -14,21 +17,79 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import List, Optional
+
+# Chi-squared gate threshold for 2 DOF at 95% confidence.  Innovations whose
+# Mahalanobis distance squared (d² = νᵀ S⁻¹ ν) exceed this value are treated
+# as outliers.  The Euclidean ``max_innovation_m`` is kept as a hard absolute
+# cap (catches physically impossible jumps regardless of covariance).
+_CHI2_2DOF_95: float = 5.991
+
+# Type alias for 2-D matrices represented as lists of lists.
+_Mat = List[List[float]]
+
+
+# ---------------------------------------------------------------------------
+# Pure-Python matrix helpers (4×4 / 2×2 — no numpy)
+# ---------------------------------------------------------------------------
+
+
+def _mat_mul(A: _Mat, B: _Mat) -> _Mat:
+    """Generic matrix multiply for small dense matrices."""
+    rows_a, cols_a = len(A), len(A[0])
+    cols_b = len(B[0])
+    return [
+        [sum(A[i][k] * B[k][j] for k in range(cols_a)) for j in range(cols_b)]
+        for i in range(rows_a)
+    ]
+
+
+def _mat_T(A: _Mat) -> _Mat:
+    """Transpose."""
+    return [[A[j][i] for j in range(len(A))] for i in range(len(A[0]))]
+
+
+def _mat_add(A: _Mat, B: _Mat) -> _Mat:
+    return [[A[i][j] + B[i][j] for j in range(len(A[0]))] for i in range(len(A))]
+
+
+def _identity(n: int) -> _Mat:
+    return [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+
+
+def _inv_2x2(M: _Mat) -> _Mat:
+    """Inverse of a 2×2 matrix; clamps determinant away from zero."""
+    det = M[0][0] * M[1][1] - M[0][1] * M[1][0]
+    if abs(det) < 1e-12:
+        det = math.copysign(1e-12, det) if det != 0 else 1e-12
+    inv_det = 1.0 / det
+    return [
+        [M[1][1] * inv_det, -M[0][1] * inv_det],
+        [-M[1][0] * inv_det, M[0][0] * inv_det],
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Public types
+# ---------------------------------------------------------------------------
 
 
 @dataclass
 class MotionDelta:
     """Robot motion since the previous fix, in the WiFi floor-plan frame.
 
-    ``dx_m`` / ``dy_m`` are only applied as a prediction step when
-    ``has_direction`` is true (a frame-aligned source such as SLAM). Sources
-    that only expose speed or a moving/stopped flag leave them at zero and
-    instead drive ``speed_mps`` / ``is_moving`` so the filter can adapt how much
-    it smooths.
+    ``dx_m`` / ``dy_m`` are positional displacement (from SLAM pose delta or
+    IMU velocity × dt).  ``vx_m`` / ``vy_m`` carry the floor-frame IMU
+    velocity when a MovementSensor provides orientation; the EKF predict step
+    uses these to update the velocity states directly.  Sources that only
+    expose speed or a moving/stopped flag leave the velocity fields at zero and
+    set ``has_direction=False``.
     """
 
     dx_m: float = 0.0
     dy_m: float = 0.0
+    vx_m: float = 0.0
+    vy_m: float = 0.0
     speed_mps: float = 0.0
     is_moving: bool = True
     has_direction: bool = False
@@ -65,35 +126,45 @@ def measurement_var_from_fix(
     *,
     base_noise_m: float,
     anchor_count: int,
-    residual_rmse_m: float | None = None,
+    residual_rmse_m: Optional[float] = None,
     fp_blend_weight: float = 0.0,
 ) -> float:
-    """Estimate WiFi fix variance (m^2) from data the locator already returns.
+    """Estimate WiFi fix variance (m²) from data the locator already returns.
 
     A fix backed by more anchors and a stronger fingerprint match is trusted
     more (smaller variance → larger Kalman gain); a large geometric residual
     widens it. The result is a 1-sigma standard deviation squared.
     """
     sigma = max(base_noise_m, 1e-3)
-    # More anchors tighten the fix; 3 anchors is the configured floor.
     sigma *= math.sqrt(3.0 / max(anchor_count, 1))
-    # A confident fingerprint blend shrinks the effective noise (cap at -50%).
     sigma *= 1.0 - 0.5 * max(0.0, min(1.0, fp_blend_weight))
-    # A large weighted residual signals a poor geometric fit; widen the fix.
     if residual_rmse_m is not None and residual_rmse_m > base_noise_m:
         sigma += residual_rmse_m - base_noise_m
     return sigma * sigma
 
 
-class PositionFilter:
-    """Adaptive per-axis Kalman filter fusing motion prediction with WiFi fixes.
+# ---------------------------------------------------------------------------
+# 4-state EKF
+# ---------------------------------------------------------------------------
 
-    The state is 2D position with independent (diagonal) variance per axis. The
-    process noise grows with measured speed, so the estimate barely moves while
-    the robot is stationary (heavy smoothing) and tracks quickly while driving.
-    Fixes whose innovation exceeds ``max_innovation_m`` are rejected as outliers;
-    after ``max_consecutive_rejects`` rejections the filter re-seeds to the
-    measurement so it can recover from divergence or a relocated robot.
+
+class PositionFilter:
+    """4-state EKF (x, y, vx, vy) fusing motion prediction with position fixes.
+
+    **Predict step** (every IMU/motion tick):
+    The constant-velocity transition model propagates the state through
+    ``F(dt)`` and inflates covariance by ``Q``.  When a ``MotionDelta`` with
+    ``has_direction=True`` is supplied, the measured displacement overrides the
+    filter's position prediction; when IMU velocity ``(vx_m, vy_m)`` is also
+    set, the velocity states are pinned to those values.
+
+    **Update step** (when a position fix arrives — WiFi or BLE):
+    The measurement model ``H = [[1,0,0,0],[0,1,0,0]]`` selects position from
+    the state.  Innovations are screened by a Mahalanobis chi-squared gate
+    (2 DOF, default 95 % confidence) **and** a hard Euclidean cap
+    (``max_innovation_m``).  After ``max_consecutive_rejects`` consecutive
+    rejections the filter re-seeds to the measurement so it recovers from a
+    sudden relocation.
     """
 
     def __init__(
@@ -101,53 +172,97 @@ class PositionFilter:
         *,
         process_noise_m: float = 0.5,
         measurement_noise_m: float = 3.0,
+        velocity_noise_mps: float = 0.1,
         max_innovation_m: float = 8.0,
+        chi2_threshold: float = _CHI2_2DOF_95,
         speed_scale: float = 1.0,
         init_variance_m2: float = 25.0,
+        init_velocity_variance_m2ps2: float = 0.25,
         max_consecutive_rejects: int = 5,
     ) -> None:
         self.process_noise_m = max(process_noise_m, 0.0)
         self.measurement_noise_m = max(measurement_noise_m, 1e-3)
+        self.velocity_noise_mps = max(velocity_noise_mps, 0.0)
         self.max_innovation_m = max_innovation_m
+        self.chi2_threshold = chi2_threshold
         self.speed_scale = max(speed_scale, 0.0)
         self.init_variance_m2 = max(init_variance_m2, 1e-3)
+        self.init_velocity_variance_m2ps2 = max(init_velocity_variance_m2ps2, 0.0)
         self.max_consecutive_rejects = max(max_consecutive_rejects, 1)
-        self._x: float | None = None
-        self._y: float | None = None
-        self._px = self.init_variance_m2
-        self._py = self.init_variance_m2
-        self._rejects = 0
+        self._state: list[float] | None = None   # [x, y, vx, vy]
+        self._P: _Mat = _identity(4)             # 4×4 covariance
+        self._rejects: int = 0
 
     @property
     def initialized(self) -> bool:
-        return self._x is not None and self._y is not None
+        return self._state is not None
 
     @property
     def position(self) -> tuple[float, float] | None:
-        if not self.initialized:
+        if self._state is None:
             return None
-        return (self._x, self._y)  # type: ignore[return-value]
+        return (self._state[0], self._state[1])
 
     def reset(self) -> None:
-        self._x = None
-        self._y = None
-        self._px = self.init_variance_m2
-        self._py = self.init_variance_m2
+        self._state = None
+        self._P = _identity(4)
         self._rejects = 0
 
     def predict(self, motion: MotionDelta, dt_s: float) -> None:
-        """Shift the estimate by directional motion and inflate uncertainty."""
+        """Propagate the estimate forward using the constant-velocity model.
+
+        The state is updated by ``F(dt) @ x`` then optionally overridden with
+        the measured displacement/velocity from ``motion``.  Covariance grows
+        according to ``Q`` (which scales with measured speed).
+        """
         if not self.initialized:
             return
-        if motion.has_direction:
-            self._x += motion.dx_m  # type: ignore[operator]
-            self._y += motion.dy_m  # type: ignore[operator]
+
         dt = max(dt_s, 0.0)
         speed = max(motion.speed_mps, 0.0) if motion.is_moving else 0.0
-        step = self.process_noise_m + speed * self.speed_scale * dt
-        q = step * step
-        self._px += q
-        self._py += q
+
+        x = self._state  # type: ignore[assignment]
+
+        # F(dt) @ x — constant-velocity propagation
+        x_pred = [
+            x[0] + x[2] * dt,
+            x[1] + x[3] * dt,
+            x[2],
+            x[3],
+        ]
+
+        # Override position with measured displacement when available.
+        # Override velocity states when IMU floor-frame velocity is present.
+        if motion.has_direction:
+            x_pred[0] = x[0] + motion.dx_m
+            x_pred[1] = x[1] + motion.dy_m
+            if motion.vx_m != 0.0 or motion.vy_m != 0.0:
+                x_pred[2] = motion.vx_m
+                x_pred[3] = motion.vy_m
+
+        self._state = x_pred
+
+        # Build F (constant-velocity transition)
+        F: _Mat = [
+            [1.0, 0.0,  dt, 0.0],
+            [0.0, 1.0, 0.0,  dt],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+
+        # Process noise Q (block-diagonal: position + velocity blocks)
+        q_pos = (self.process_noise_m + speed * self.speed_scale * dt) ** 2
+        q_vel = (self.velocity_noise_mps * dt) ** 2
+        Q: _Mat = [
+            [q_pos, 0.0,   0.0,   0.0  ],
+            [0.0,   q_pos, 0.0,   0.0  ],
+            [0.0,   0.0,   q_vel, 0.0  ],
+            [0.0,   0.0,   0.0,   q_vel],
+        ]
+
+        # P = F @ P @ Fᵀ + Q
+        FP = _mat_mul(F, self._P)
+        self._P = _mat_add(_mat_mul(FP, _mat_T(F)), Q)
 
     def update(
         self,
@@ -157,39 +272,97 @@ class PositionFilter:
         measurement_var_m2: float | None = None,
         max_innovation_m: float | None = None,
     ) -> bool:
-        """Correct with a WiFi fix. Returns False when the fix is gated out."""
-        if measurement_var_m2 is None:
-            r = self.measurement_noise_m * self.measurement_noise_m
-        else:
-            r = max(measurement_var_m2, 1e-6)
+        """Correct with a position fix (WiFi or BLE).
+
+        Returns ``True`` when the fix was accepted (or used to re-seed after
+        persistent rejection), ``False`` when it was gated out.
+
+        The innovation is screened by both a Mahalanobis chi-squared gate and
+        a hard Euclidean cap so that wildly wrong measurements never corrupt
+        the estimate even if the covariance has collapsed.
+        """
+        r = (
+            self.measurement_noise_m ** 2
+            if measurement_var_m2 is None
+            else max(measurement_var_m2, 1e-6)
+        )
 
         if not self.initialized:
-            self._x = meas_x
-            self._y = meas_y
-            self._px = r
-            self._py = r
+            self._state = [meas_x, meas_y, 0.0, 0.0]
+            P0 = self.init_variance_m2
+            Pv = self.init_velocity_variance_m2ps2
+            self._P = [
+                [r,   0.0, 0.0, 0.0],
+                [0.0, r,   0.0, 0.0],
+                [0.0, 0.0, Pv,  0.0],
+                [0.0, 0.0, 0.0, Pv ],
+            ]
+            # Use init_variance_m2 for position if r < it (first seed may have
+            # a tight measurement variance from a confident fingerprint fix).
+            if P0 > r:
+                self._P[0][0] = r
+                self._P[1][1] = r
             self._rejects = 0
             return True
 
+        P = self._P
+        x = self._state  # type: ignore[assignment]
+
+        # Innovation  ν = z − H·x  (H selects position states)
+        innov = [meas_x - x[0], meas_y - x[1]]
+
+        # Innovation covariance  S = H·P·Hᵀ + R  (top-left 2×2 of P plus R)
+        S: _Mat = [
+            [P[0][0] + r, P[0][1]    ],
+            [P[1][0],     P[1][1] + r],
+        ]
+        S_inv = _inv_2x2(S)
+
+        # Mahalanobis distance squared  d² = νᵀ S⁻¹ ν
+        d2 = (
+            innov[0] * (S_inv[0][0] * innov[0] + S_inv[0][1] * innov[1])
+            + innov[1] * (S_inv[1][0] * innov[0] + S_inv[1][1] * innov[1])
+        )
+
+        # Chi-squared gate (primary) + hard Euclidean cap (secondary)
+        chi2_gated = d2 > self.chi2_threshold
         gate = self.max_innovation_m if max_innovation_m is None else max_innovation_m
-        innovation = math.hypot(meas_x - self._x, meas_y - self._y)  # type: ignore[operator]
-        if gate is not None and gate > 0 and innovation > gate:
+        euclid_gated = gate > 0 and math.hypot(innov[0], innov[1]) > gate
+
+        if chi2_gated or euclid_gated:
             self._rejects += 1
             if self._rejects < self.max_consecutive_rejects:
                 return False
-            # Persistent disagreement: trust the sensor and re-seed.
-            self._x = meas_x
-            self._y = meas_y
-            self._px = r
-            self._py = r
+            # Persistent disagreement → re-seed to the measurement
+            self._state = [meas_x, meas_y, 0.0, 0.0]
+            Pv = self.init_velocity_variance_m2ps2
+            self._P = [
+                [r,   0.0, 0.0, 0.0],
+                [0.0, r,   0.0, 0.0],
+                [0.0, 0.0, Pv,  0.0],
+                [0.0, 0.0, 0.0, Pv ],
+            ]
             self._rejects = 0
             return True
 
         self._rejects = 0
-        kx = self._px / (self._px + r)
-        ky = self._py / (self._py + r)
-        self._x += kx * (meas_x - self._x)  # type: ignore[operator]
-        self._y += ky * (meas_y - self._y)  # type: ignore[operator]
-        self._px = (1.0 - kx) * self._px
-        self._py = (1.0 - ky) * self._py
+
+        # Kalman gain  K = P·Hᵀ·S⁻¹
+        # P·Hᵀ = first two columns of P (H selects position states)
+        PHt: _Mat = [[P[i][0], P[i][1]] for i in range(4)]
+        K: _Mat = _mat_mul(PHt, S_inv)   # 4×2
+
+        # State update  x = x + K·ν
+        for i in range(4):
+            self._state[i] = x[i] + K[i][0] * innov[0] + K[i][1] * innov[1]
+
+        # Covariance update  P = (I − K·H)·P
+        # (K·H)[i][j] = K[i][0] if j==0, K[i][1] if j==1, 0 otherwise
+        # → (I − K·H)·P  row i  = P[i] − K[i][0]·P[0] − K[i][1]·P[1]
+        P0_row = P[0][:]
+        P1_row = P[1][:]
+        self._P = [
+            [P[i][j] - K[i][0] * P0_row[j] - K[i][1] * P1_row[j] for j in range(4)]
+            for i in range(4)
+        ]
         return True

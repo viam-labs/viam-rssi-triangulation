@@ -21,6 +21,25 @@ class ConfiguredAccessPoint:
 
 
 @dataclass(frozen=True)
+class BleBeacon:
+    """A BLE beacon at a fixed floor-plan position used for ranging.
+
+    ``mac_address`` should be a lowercase colon-separated MAC.
+    ``tx_power_dbm`` is the transmit power at 1 m (calibrate per device;
+    iBeacon standard is typically −59 dBm).  ``path_loss_n`` is the
+    environment-specific path-loss exponent (2–4; same model as WiFi).
+    """
+
+    name: str
+    x_m: float
+    y_m: float
+    z_m: float
+    mac_address: str
+    tx_power_dbm: float = -59.0
+    path_loss_n: float = 2.5
+
+
+@dataclass(frozen=True)
 class LocatorConfig:
     scan_ssid: str
     scan_count: int
@@ -33,6 +52,9 @@ class LocatorConfig:
     # floor). When set, positions are clamped to [0, width] / [0, height].
     width_m: float | None = None
     height_m: float | None = None
+    # Optional BLE beacons for additional ranging / sensor fusion.
+    ble_beacons: tuple[BleBeacon, ...] = ()
+    ble_min_rssi_dbm: float = -90.0
 
 
 def _float_field(fields: Mapping[str, Any], key: str, *, default: float | None = None) -> float:
@@ -105,6 +127,24 @@ def _parse_access_point_item(
     )
 
 
+def _parse_ble_beacon_item(item: Any) -> BleBeacon:
+    fields = _struct_fields(item)
+    name = _string_field(fields, "name")
+    mac = _string_field(fields, "mac_address").lower().strip()
+    z_m = _float_field(fields, "z_m", default=1.0)
+    tx_power = _float_field(fields, "tx_power_dbm", default=-59.0)
+    path_loss = _float_field(fields, "path_loss_n", default=2.5)
+    return BleBeacon(
+        name=name,
+        x_m=_float_field(fields, "x_m"),
+        y_m=_float_field(fields, "y_m"),
+        z_m=z_m,
+        mac_address=mac,
+        tx_power_dbm=tx_power,
+        path_loss_n=path_loss,
+    )
+
+
 def parse_config_dict(raw: dict[str, Any]) -> LocatorConfig:
     """Parse module config from a plain JSON object (local testing / export)."""
     if "scan_ssid" not in raw:
@@ -137,6 +177,13 @@ def parse_config_dict(raw: dict[str, Any]) -> LocatorConfig:
     if len(aps) < 1:
         raise ValueError("access_points must contain at least one AP")
 
+    ble_beacons: tuple[BleBeacon, ...] = ()
+    if "ble_beacons" in raw and raw["ble_beacons"]:
+        ble_beacons = tuple(
+            _parse_ble_beacon_item(b) for b in raw["ble_beacons"]
+        )
+    ble_min_rssi_dbm = float(raw.get("ble_min_rssi_dbm", -90.0))
+
     return LocatorConfig(
         scan_ssid=str(raw["scan_ssid"]),
         scan_count=scan_count,
@@ -147,6 +194,8 @@ def parse_config_dict(raw: dict[str, Any]) -> LocatorConfig:
         access_points=aps,
         width_m=width_m,
         height_m=height_m,
+        ble_beacons=ble_beacons,
+        ble_min_rssi_dbm=ble_min_rssi_dbm,
     )
 
 

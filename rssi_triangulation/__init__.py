@@ -2,6 +2,13 @@
 
 from .aps import normalize_mac, resolve_ap_name, unifi_bssid_variants
 from .aggregate import AggregatedWifiReading, aggregate_wifi_readings, collect_averaged_readings
+from .ble_scan import (
+    BackgroundBleScanner,
+    BleReading,
+    BleScanBuffer,
+    ble_rssi_to_distance_m,
+    trilaterate_ble,
+)
 from .fusion import (
     MotionDelta,
     PositionFilter,
@@ -11,7 +18,13 @@ from .fusion import (
 from .linux_scan import WifiReading, scan_wifi
 from .locate import PositionReading, estimate_from_matched, locate_position
 from .scanner import BackgroundScanner, RssiSampleBuffer, TimedSample, decayed_aggregate
-from .module_config import LocatorConfig, load_config_file, parse_config_dict, registry_from_config
+from .module_config import (
+    BleBeacon,
+    LocatorConfig,
+    load_config_file,
+    parse_config_dict,
+    registry_from_config,
+)
 from .registry import AccessPoint, ApRegistry
 from .triangulate import PositionEstimate, estimate_position
 
@@ -19,7 +32,11 @@ __all__ = [
     "AccessPoint",
     "AggregatedWifiReading",
     "ApRegistry",
+    "BackgroundBleScanner",
     "BackgroundScanner",
+    "BleBeacon",
+    "BleReading",
+    "BleScanBuffer",
     "LocatorConfig",
     "MotionDelta",
     "PositionEstimate",
@@ -29,6 +46,7 @@ __all__ = [
     "TimedSample",
     "WifiReading",
     "aggregate_wifi_readings",
+    "ble_rssi_to_distance_m",
     "collect_averaged_readings",
     "decayed_aggregate",
     "estimate_from_matched",
@@ -42,5 +60,6 @@ __all__ = [
     "resolve_ap_name",
     "scan_wifi",
     "slam_pose_delta",
+    "trilaterate_ble",
     "unifi_bssid_variants",
 ]

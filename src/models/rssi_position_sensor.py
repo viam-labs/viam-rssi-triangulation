@@ -1,4 +1,4 @@
-"""Viam sensor: WiFi RSSI floor position."""
+"""Viam sensor: WiFi RSSI floor position with IMU + optional BLE fusion."""
 
 from __future__ import annotations
 
@@ -21,6 +21,11 @@ from viam.resource.types import Model, ModelFamily
 from viam.services.slam import SLAMClient
 from viam.utils import SensorReading, ValueTypes
 
+from rssi_triangulation.ble_scan import (
+    BackgroundBleScanner,
+    beacon_count_from_snapshot,
+    trilaterate_ble,
+)
 from rssi_triangulation.calibrate import try_periodic_path_loss_calibration
 from rssi_triangulation.fingerprint import FingerprintStore
 from rssi_triangulation.fingerprint_commands import execute_fingerprint_command
@@ -134,9 +139,13 @@ class RssiPositionSensor(Sensor, EasyResource):
     _base_moving_speed_mps: float
     _slam_yaw_offset_deg: float
     _slam_scale: float
+    _imu_yaw_offset_deg: float
     _last_motion_time: float | None
     _last_slam_xy_mm: tuple[float, float] | None
     _scanner: BackgroundScanner | None
+    # BLE
+    _ble_scanner: BackgroundBleScanner | None
+    _ble_measurement_noise_m2: float
 
     @classmethod
     def new(
@@ -295,6 +304,12 @@ class RssiPositionSensor(Sensor, EasyResource):
         sensor._slam_scale = (
             fields["slam_scale"].number_value if "slam_scale" in fields else 1.0
         )
+        # IMU mounting offset relative to the floor plan (degrees, CCW positive)
+        sensor._imu_yaw_offset_deg = (
+            fields["imu_yaw_offset_deg"].number_value
+            if "imu_yaw_offset_deg" in fields
+            else 0.0
+        )
         if sensor._fusion_enabled and has_source:
             sensor._position_filter = PositionFilter(
                 process_noise_m=(
@@ -304,10 +319,20 @@ class RssiPositionSensor(Sensor, EasyResource):
                 ),
                 measurement_noise_m=sensor._fusion_measurement_noise_m,
                 max_innovation_m=sensor._fusion_max_innovation_m,
+                velocity_noise_mps=(
+                    fields["fusion_velocity_noise_mps"].number_value
+                    if "fusion_velocity_noise_mps" in fields
+                    else 0.1
+                ),
                 speed_scale=(
                     fields["fusion_speed_scale"].number_value
                     if "fusion_speed_scale" in fields
                     else 1.0
+                ),
+                init_velocity_variance_m2ps2=(
+                    fields["fusion_init_velocity_variance"].number_value
+                    if "fusion_init_velocity_variance" in fields
+                    else 0.25
                 ),
             )
         else:
@@ -315,8 +340,7 @@ class RssiPositionSensor(Sensor, EasyResource):
         sensor._last_motion_time = None
         sensor._last_slam_xy_mm = None
 
-        # Default on: the sensor is polled repeatedly on a robot, which is the
-        # continuous case background scanning was built for.
+        # WiFi background scanner (on by default)
         background_scan = (
             fields["background_scan"].bool_value
             if "background_scan" in fields
@@ -348,6 +372,33 @@ class RssiPositionSensor(Sensor, EasyResource):
             sensor._scanner.start()
         else:
             sensor._scanner = None
+
+        # BLE background scanner (only when beacons are configured)
+        sensor._ble_measurement_noise_m2 = (
+            fields["ble_measurement_noise_m2"].number_value
+            if "ble_measurement_noise_m2" in fields
+            else 6.0
+        )
+        if sensor._config.ble_beacons:
+            ble_interval_s = (
+                fields["ble_scan_interval_s"].number_value
+                if "ble_scan_interval_s" in fields
+                else 1.0
+            )
+            try:
+                sensor._ble_scanner = BackgroundBleScanner(
+                    scan_interval_s=ble_interval_s,
+                    buffer_max_age_s=max(ble_interval_s * 5, 5.0),
+                )
+                sensor._ble_scanner.start()
+            except ImportError as exc:
+                sensor.logger.warning(
+                    "BLE beacons configured but bleak is not installed: %s", exc
+                )
+                sensor._ble_scanner = None
+        else:
+            sensor._ble_scanner = None
+
         return sensor
 
     @staticmethod
@@ -363,7 +414,6 @@ class RssiPositionSensor(Sensor, EasyResource):
         resource = dependencies.get(resource_name)
         if resource is not None:
             return resource
-        # Fall back to matching on the short name if the key differs.
         for key, dep in dependencies.items():
             if key.name == name:
                 return dep
@@ -417,6 +467,9 @@ class RssiPositionSensor(Sensor, EasyResource):
         if self._scanner is not None:
             await asyncio.to_thread(self._scanner.stop)
             self._scanner = None
+        if self._ble_scanner is not None:
+            await asyncio.to_thread(self._ble_scanner.stop)
+            self._ble_scanner = None
         await super().close()
 
     @classmethod
@@ -424,23 +477,25 @@ class RssiPositionSensor(Sensor, EasyResource):
         cls, config: ComponentConfig
     ) -> Tuple[Sequence[str], Sequence[str]]:
         parse_component_config(config.attributes)
-        # Motion sources are optional; declare configured ones so viam-server
-        # injects them as dependencies for get_readings() fusion.
         optional_deps = list(_motion_source_names(config.attributes.fields).values())
         return [], optional_deps
 
     async def _read_motion(self, dt_s: float) -> MotionDelta:
         """Sample configured motion sources into a floor-frame ``MotionDelta``.
 
-        Each source is best-effort: a failing read is logged and skipped rather
-        than failing the position reading. SLAM (when present) supplies a
-        directional pose delta; the movement sensor and base contribute speed /
-        moving state used to adapt how aggressively the filter smooths.
+        SLAM (when present) supplies the primary directional pose delta.
+        The MovementSensor now contributes floor-frame velocity by combining
+        ``get_linear_velocity()`` with ``get_orientation()`` (yaw) to rotate
+        from body frame to floor frame — enabling the 4-state EKF to track
+        velocity.  When SLAM is absent, the integrated velocity also supplies
+        the positional displacement.
         """
         sources: list[str] = []
         speed = 0.0
         dx = 0.0
         dy = 0.0
+        vx_m = 0.0
+        vy_m = 0.0
         has_direction = False
         is_moving = True
 
@@ -460,15 +515,45 @@ class RssiPositionSensor(Sensor, EasyResource):
                         speed = max(speed, math.hypot(dx, dy) / dt_s)
                 self._last_slam_xy_mm = curr
                 sources.append("slam")
-            except Exception as exc:  # best-effort: motion is optional
+            except Exception as exc:
                 self.logger.warning("slam motion read failed: %s", exc)
 
         if self._movement_sensor is not None:
             try:
                 v = await self._movement_sensor.get_linear_velocity()
-                speed = max(speed, math.hypot(v.x, v.y))
+                body_speed = math.hypot(v.x, v.y)
+                speed = max(speed, body_speed)
+
+                # Attempt to read orientation to rotate body → floor frame.
+                # Falls back to imu_yaw_offset_deg only when orientation is
+                # unavailable (e.g. encoder-only sensors without a gyroscope).
+                yaw_rad = 0.0
+                try:
+                    orientation = await self._movement_sensor.get_orientation()
+                    # Viam Orientation is axis-angle: (o_x, o_y, o_z, theta°).
+                    # For a ground robot rotating around z: o_z≈1, theta = yaw.
+                    yaw_rad = math.radians(orientation.theta * orientation.o_z)
+                except Exception:
+                    pass  # sensor doesn't support orientation; use offset only
+
+                total_yaw = yaw_rad + math.radians(self._imu_yaw_offset_deg)
+                cos_y = math.cos(total_yaw)
+                sin_y = math.sin(total_yaw)
+                vx_floor = v.x * cos_y - v.y * sin_y
+                vy_floor = v.x * sin_y + v.y * cos_y
+
+                vx_m = vx_floor
+                vy_m = vy_floor
+
+                # When SLAM isn't providing direction, integrate IMU velocity
+                # to get positional displacement for the predict step.
+                if not has_direction and dt_s > 0:
+                    dx = vx_floor * dt_s
+                    dy = vy_floor * dt_s
+                    has_direction = True
+
                 sources.append("movement_sensor")
-            except Exception as exc:  # best-effort: motion is optional
+            except Exception as exc:
                 self.logger.warning("movement_sensor read failed: %s", exc)
 
         if self._base is not None:
@@ -479,15 +564,19 @@ class RssiPositionSensor(Sensor, EasyResource):
                     speed = 0.0
                     dx = 0.0
                     dy = 0.0
+                    vx_m = 0.0
+                    vy_m = 0.0
                 elif speed == 0.0:
                     speed = self._base_moving_speed_mps
                 sources.append("base")
-            except Exception as exc:  # best-effort: motion is optional
+            except Exception as exc:
                 self.logger.warning("base motion read failed: %s", exc)
 
         return MotionDelta(
             dx_m=dx,
             dy_m=dy,
+            vx_m=vx_m,
+            vy_m=vy_m,
             speed_mps=speed,
             is_moving=is_moving,
             has_direction=has_direction,
@@ -495,11 +584,7 @@ class RssiPositionSensor(Sensor, EasyResource):
         )
 
     def _locate_from_buffer(self):
-        """Estimate position from the background scanner's rolling buffer.
-
-        Returns the same tuple shape as ``locate_position`` so the
-        ``get_readings`` post-processing is shared between both paths.
-        """
+        """Estimate position from the background scanner's rolling buffer."""
         scanner = self._scanner
         assert scanner is not None
         if not scanner.wait_for_samples(timeout_s=10.0):
@@ -606,6 +691,8 @@ class RssiPositionSensor(Sensor, EasyResource):
         )
 
         motion_detail = ""
+        ble_detail: dict[str, Any] = {}
+
         if self._position_filter is not None:
             now = monotonic()
             dt = (
@@ -614,19 +701,64 @@ class RssiPositionSensor(Sensor, EasyResource):
                 else 0.0
             )
             self._last_motion_time = now
+
+            # --- Predict step (IMU / SLAM) ---
             motion = await self._read_motion(dt)
             self._position_filter.predict(motion, dt)
+
+            # --- WiFi update step ---
             meas_var = measurement_var_from_fix(
                 base_noise_m=self._fusion_measurement_noise_m,
                 anchor_count=len(matched),
                 fp_blend_weight=fp_match.blend_weight if fp_match is not None else 0.0,
             )
-            accepted = self._position_filter.update(
+            wifi_accepted = self._position_filter.update(
                 raw_position.x_m,
                 raw_position.y_m,
                 measurement_var_m2=meas_var,
                 max_innovation_m=self._fusion_max_innovation_m,
             )
+
+            # --- BLE update step (optional second correction) ---
+            ble_accepted = False
+            ble_beacon_count = 0
+            if self._ble_scanner is not None and self._config.ble_beacons:
+                ble_snapshot = self._ble_scanner.snapshot()
+                ble_beacon_count = beacon_count_from_snapshot(
+                    ble_snapshot,
+                    self._config.ble_beacons,
+                    min_rssi_dbm=self._config.ble_min_rssi_dbm,
+                )
+                # Use current filter position as the prior for single-beacon fallback
+                prior_pos = self._position_filter.position
+                ble_fix = trilaterate_ble(
+                    ble_snapshot,
+                    self._config.ble_beacons,
+                    self._config,
+                    device_z_m=self._device_z_m,
+                    min_rssi_dbm=self._config.ble_min_rssi_dbm,
+                    prior_x=prior_pos[0] if prior_pos else raw_position.x_m,
+                    prior_y=prior_pos[1] if prior_pos else raw_position.y_m,
+                )
+                if ble_fix is not None:
+                    ble_accepted = self._position_filter.update(
+                        ble_fix[0],
+                        ble_fix[1],
+                        measurement_var_m2=self._ble_measurement_noise_m2,
+                        max_innovation_m=self._fusion_max_innovation_m,
+                    )
+                    ble_detail = {
+                        "x": ble_fix[0],
+                        "y": ble_fix[1],
+                        "beacon_count": ble_beacon_count,
+                        "accepted": ble_accepted,
+                    }
+                else:
+                    ble_detail = {
+                        "beacon_count": ble_beacon_count,
+                        "accepted": False,
+                    }
+
             fused = self._position_filter.position
             position = (
                 PositionReading(x_m=fused[0], y_m=fused[1], z_m=raw_position.z_m)
@@ -635,7 +767,8 @@ class RssiPositionSensor(Sensor, EasyResource):
             )
             motion_detail = (
                 f", motion[{'+'.join(motion.sources) or 'none'}]"
-                f" v={motion.speed_mps:.2f}m/s{'' if accepted else ' gated'}"
+                f" v={motion.speed_mps:.2f}m/s{'' if wifi_accepted else ' wifi-gated'}"
+                + (f" ble={ble_beacon_count}b{'✓' if ble_accepted else '✗'}" if ble_detail else "")
             )
         else:
             position = smooth_position(
@@ -692,7 +825,7 @@ class RssiPositionSensor(Sensor, EasyResource):
             if fp_store.count() > 0
             else None
         )
-        return build_readings_dict(
+        result = build_readings_dict(
             position,
             matched,
             self._config,
@@ -700,6 +833,10 @@ class RssiPositionSensor(Sensor, EasyResource):
             fp_match=fp_match,
             fingerprint_rankings=rankings,
         )
+        if ble_detail:
+            result = dict(result)
+            result["ble_fix"] = ble_detail
+        return result
 
     async def do_command(
         self,
@@ -736,8 +873,6 @@ class RssiPositionSensor(Sensor, EasyResource):
             current_path_loss_n=self._path_loss_n,
         )
         if cmd.get("command") == "calibrate_path_loss" and result.get("ok"):
-            # Applied values live until restart; persist them in the component
-            # config (tx_power_dbm / path_loss_n) to make them permanent.
             apply = bool(cmd.get("apply", False))
             if apply:
                 self._tx_power_dbm = float(result["tx_power_dbm"])
