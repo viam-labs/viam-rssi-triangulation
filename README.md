@@ -592,7 +592,7 @@ Notes:
 
 BLE beacons (iBeacon, Eddystone, or any Bluetooth LE device that advertises RSSI) can supplement WiFi ranging. A background BLE scanner thread collects advertisements continuously; `get_readings()` trilaterate a fix from visible beacons and feeds it into the motion fusion EKF as a second independent correction.
 
-**Requires:** `pip install bleak` (or `bleak>=0.21.1` in `requirements.txt`). Bleak is an optional dependency — an error is raised only when `ble_beacons` is non-empty and `bleak` is not installed; the module runs normally for WiFi-only use without it.
+`bleak` is included in `requirements.txt` and installed automatically. It is only active when `ble_beacons` is non-empty; the module runs normally for WiFi-only use without any BLE configuration.
 
 Add a `ble_beacons` array to your config alongside `access_points`:
 
