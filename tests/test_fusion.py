@@ -7,6 +7,7 @@ import pytest
 from rssi_triangulation.fusion import (
     MotionDelta,
     PositionFilter,
+    SignalFix,
     _CHI2_2DOF_95,
     _inv_2x2,
     _mat_mul,
@@ -265,3 +266,159 @@ def test_measurement_var_tightens_with_fingerprint_confidence() -> None:
         base_noise_m=3.0, anchor_count=4, fp_blend_weight=1.0
     )
     assert with_fp < no_fp
+
+
+# ---------------------------------------------------------------------------
+# SignalFix dataclass
+# ---------------------------------------------------------------------------
+
+
+def test_signal_fix_defaults() -> None:
+    fix = SignalFix(
+        x_m=3.0,
+        y_m=4.0,
+        measurement_var_m2=9.0,
+        source="wifi",
+        anchor_count=5,
+        method="centroid",
+    )
+    assert fix.x_m == 3.0
+    assert fix.y_m == 4.0
+    assert fix.measurement_var_m2 == 9.0
+    assert fix.source == "wifi"
+    assert fix.anchor_count == 5
+    assert fix.method == "centroid"
+    assert fix.metadata == {}
+
+
+def test_signal_fix_metadata_passthrough() -> None:
+    meta = {"backend": "nmcli", "scans": 3}
+    fix = SignalFix(
+        x_m=1.0,
+        y_m=2.0,
+        measurement_var_m2=4.0,
+        source="wifi",
+        anchor_count=3,
+        method="centroid+fp",
+        metadata=meta,
+    )
+    assert fix.metadata["backend"] == "nmcli"
+    assert fix.metadata["scans"] == 3
+
+
+def test_signal_fix_ble_source() -> None:
+    fix = SignalFix(
+        x_m=5.0,
+        y_m=7.0,
+        measurement_var_m2=6.0,
+        source="ble",
+        anchor_count=3,
+        method="ble-trilateration",
+        metadata={"beacon_count": 3},
+    )
+    assert fix.source == "ble"
+    assert fix.metadata["beacon_count"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Multi-source EKF: dual sequential updates in a single predict/update cycle
+# ---------------------------------------------------------------------------
+
+
+def test_dual_source_both_updates_applied() -> None:
+    """WiFi and BLE fixes applied sequentially in one cycle should both shift the state."""
+    f = PositionFilter(process_noise_m=0.5, max_innovation_m=50.0)
+    f.update(0.0, 0.0)
+
+    f.predict(MotionDelta(is_moving=False), dt_s=1.0)
+
+    wifi_fix = SignalFix(
+        x_m=3.0, y_m=0.0, measurement_var_m2=9.0, source="wifi", anchor_count=4, method="centroid"
+    )
+    ble_fix = SignalFix(
+        x_m=3.5, y_m=0.0, measurement_var_m2=6.0, source="ble", anchor_count=3, method="ble-trilateration"
+    )
+
+    for fix in [wifi_fix, ble_fix]:
+        f.update(fix.x_m, fix.y_m, measurement_var_m2=fix.measurement_var_m2)
+
+    x, _ = f.position
+    # After two updates from x=3 and x=3.5 the estimate should be between 0 and 3.5
+    assert x > 0.0
+    assert x < 4.0
+
+
+def test_dual_source_tighter_variance_pulls_more() -> None:
+    """The source with lower measurement variance should attract the estimate more.
+
+    Starting from x=3, two updates at x=2 and x=4 are given with swapped
+    variances.  The tightly-weighted source dominates, so whichever measurement
+    carries the lower variance pulls the final estimate toward itself.
+    Note: measurements must stay within the chi-squared gate so neither update
+    is rejected; the values here are chosen to ensure that.
+    """
+    f_tight_low = PositionFilter(max_innovation_m=100.0)
+    f_tight_high = PositionFilter(max_innovation_m=100.0)
+
+    for f in (f_tight_low, f_tight_high):
+        f.update(3.0, 0.0)
+        f.predict(MotionDelta(is_moving=False), dt_s=0.1)
+
+    # tight at x=2, loose at x=4 → estimate pulled toward x=2 (lower)
+    f_tight_low.update(2.0, 0.0, measurement_var_m2=0.25)
+    f_tight_low.update(4.0, 0.0, measurement_var_m2=25.0)
+
+    # loose at x=2, tight at x=4 → estimate pulled toward x=4 (higher)
+    f_tight_high.update(2.0, 0.0, measurement_var_m2=25.0)
+    f_tight_high.update(4.0, 0.0, measurement_var_m2=0.25)
+
+    assert f_tight_low.position[0] < f_tight_high.position[0]
+
+
+def test_ble_only_ekf_cold_start_convergence() -> None:
+    """EKF initialized from BLE-only fixes (no WiFi) should converge to the true position."""
+    f = PositionFilter(
+        process_noise_m=0.5,
+        measurement_noise_m=2.5,
+        max_innovation_m=20.0,
+    )
+    true_x, true_y = 7.0, 4.0
+    still = MotionDelta(speed_mps=0.0, is_moving=False)
+
+    for _ in range(8):
+        f.predict(still, dt_s=1.0)
+        f.update(true_x, true_y, measurement_var_m2=6.0)
+
+    x, y = f.position
+    assert abs(x - true_x) < 1.0, f"x error {abs(x - true_x):.2f} m"
+    assert abs(y - true_y) < 1.0, f"y error {abs(y - true_y):.2f} m"
+
+
+def test_ble_only_ekf_reseeds_after_relocation() -> None:
+    """When BLE is the only source, the re-seed logic still recovers from a large jump."""
+    f = PositionFilter(max_innovation_m=3.0, max_consecutive_rejects=3)
+    f.update(0.0, 0.0)
+
+    # Simulate device relocating far away — filter should re-seed after 3 rejects
+    accepted = []
+    for _ in range(3):
+        f.predict(MotionDelta(is_moving=False), dt_s=1.0)
+        accepted.append(f.update(20.0, 20.0, measurement_var_m2=6.0))
+
+    assert accepted[-1] is True        # re-seed triggered on the 3rd attempt
+    assert f.position == (20.0, 20.0)
+
+
+def test_wifi_only_behaviour_unchanged() -> None:
+    """WiFi-only path (no BLE updates) still produces correct EKF output."""
+    f = PositionFilter(process_noise_m=0.2, max_innovation_m=50.0)
+    target = (5.0, 3.0)
+
+    f.update(*target)
+    for _ in range(5):
+        f.predict(MotionDelta(is_moving=False), dt_s=0.5)
+        f.update(*target, measurement_var_m2=9.0)
+
+    x, y = f.position
+    assert abs(x - target[0]) < 0.5
+    assert abs(y - target[1]) < 0.5

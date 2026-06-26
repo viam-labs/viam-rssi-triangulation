@@ -12,6 +12,7 @@ from .ble_scan import (
 from .fusion import (
     MotionDelta,
     PositionFilter,
+    SignalFix,
     measurement_var_from_fix,
     slam_pose_delta,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "MotionDelta",
     "PositionEstimate",
     "PositionFilter",
+    "SignalFix",
     "PositionReading",
     "RssiSampleBuffer",
     "TimedSample",

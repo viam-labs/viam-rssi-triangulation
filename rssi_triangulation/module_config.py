@@ -41,20 +41,28 @@ class BleBeacon:
 
 @dataclass(frozen=True)
 class LocatorConfig:
-    scan_ssid: str
-    scan_count: int
-    x_origin_m: float
-    y_origin_m: float
-    device_z_m: float
-    access_point_z_m: float
-    access_points: tuple[ConfiguredAccessPoint, ...]
+    # Floor plan geometry (shared by all signal sources)
+    x_origin_m: float = 0.0
+    y_origin_m: float = 0.0
+    device_z_m: float = 0.0
+    access_point_z_m: float = 0.0
+    # WiFi scanning — required only when WiFi is enabled
+    scan_ssid: str = ""
+    scan_count: int = 1
+    access_points: tuple[ConfiguredAccessPoint, ...] = ()
     # Optional floor extents in the reading frame (origin = corner of the
     # floor). When set, positions are clamped to [0, width] / [0, height].
     width_m: float | None = None
     height_m: float | None = None
-    # Optional BLE beacons for additional ranging / sensor fusion.
+    # BLE beacons for ranging / sensor fusion
     ble_beacons: tuple[BleBeacon, ...] = ()
     ble_min_rssi_dbm: float = -90.0
+    # Explicit signal-source enable flags.  When True (the default) each source
+    # is active if it has configured items (access_points / ble_beacons).
+    # Set to False to disable a source even when items are present — useful for
+    # temporarily testing one source while keeping the other's config intact.
+    wifi_enabled: bool = True
+    ble_enabled: bool = True
 
 
 def _float_field(fields: Mapping[str, Any], key: str, *, default: float | None = None) -> float:
@@ -146,18 +154,17 @@ def _parse_ble_beacon_item(item: Any) -> BleBeacon:
 
 
 def parse_config_dict(raw: dict[str, Any]) -> LocatorConfig:
-    """Parse module config from a plain JSON object (local testing / export)."""
-    if "scan_ssid" not in raw:
-        raise ValueError("scan_ssid is required")
-    if "scan_count" not in raw:
-        raise ValueError("scan_count is required")
-    if "access_points" not in raw:
-        raise ValueError("access_points is required")
+    """Parse module config from a plain JSON object (local testing / export).
 
-    scan_count = int(raw["scan_count"])
-    if scan_count < 1:
-        raise ValueError("scan_count must be >= 1")
+    At least one signal source must be configured:
 
+    * WiFi: provide ``access_points``, ``scan_ssid``, and ``scan_count``.
+    * BLE:  provide ``ble_beacons``.
+    * Both sources may be configured simultaneously.
+
+    Use ``wifi_enabled: false`` or ``ble_enabled: false`` to override the
+    auto-detected enabled state without removing the config entries.
+    """
     floor = raw.get("floor_plan") or {}
     x_origin_m = float(floor.get("x_origin_m", 0.0))
     y_origin_m = float(floor.get("y_origin_m", 0.0))
@@ -170,22 +177,48 @@ def parse_config_dict(raw: dict[str, Any]) -> LocatorConfig:
     if height_m is not None and height_m <= 0:
         raise ValueError("floor_plan.height_m must be > 0")
 
-    aps = tuple(
-        _parse_access_point_item(ap, default_z_m=access_point_z_m)
-        for ap in raw["access_points"]
-    )
-    if len(aps) < 1:
-        raise ValueError("access_points must contain at least one AP")
+    has_aps = bool(raw.get("access_points"))
+    has_ble = bool(raw.get("ble_beacons"))
+    if not has_aps and not has_ble:
+        raise ValueError(
+            "at least one signal source must be configured: "
+            "provide 'access_points' for WiFi, 'ble_beacons' for BLE, or both"
+        )
+
+    # WiFi scanning fields are required only when access_points are present
+    scan_ssid = ""
+    scan_count = 1
+    aps: tuple[ConfiguredAccessPoint, ...] = ()
+    if has_aps:
+        if "scan_ssid" not in raw:
+            raise ValueError("scan_ssid is required when access_points are configured")
+        if "scan_count" not in raw:
+            raise ValueError("scan_count is required when access_points are configured")
+        scan_ssid = str(raw["scan_ssid"])
+        scan_count = int(raw["scan_count"])
+        if scan_count < 1:
+            raise ValueError("scan_count must be >= 1")
+        aps = tuple(
+            _parse_access_point_item(ap, default_z_m=access_point_z_m)
+            for ap in raw["access_points"]
+        )
+        if len(aps) < 1:
+            raise ValueError("access_points must contain at least one AP")
+    else:
+        # BLE-only: scan_ssid/scan_count still accepted if provided (ignored)
+        scan_ssid = str(raw.get("scan_ssid", ""))
+        scan_count = int(raw.get("scan_count", 1))
 
     ble_beacons: tuple[BleBeacon, ...] = ()
-    if "ble_beacons" in raw and raw["ble_beacons"]:
-        ble_beacons = tuple(
-            _parse_ble_beacon_item(b) for b in raw["ble_beacons"]
-        )
+    if has_ble:
+        ble_beacons = tuple(_parse_ble_beacon_item(b) for b in raw["ble_beacons"])
     ble_min_rssi_dbm = float(raw.get("ble_min_rssi_dbm", -90.0))
 
+    wifi_enabled = bool(raw.get("wifi_enabled", True))
+    ble_enabled = bool(raw.get("ble_enabled", True))
+
     return LocatorConfig(
-        scan_ssid=str(raw["scan_ssid"]),
+        scan_ssid=scan_ssid,
         scan_count=scan_count,
         x_origin_m=x_origin_m,
         y_origin_m=y_origin_m,
@@ -196,6 +229,8 @@ def parse_config_dict(raw: dict[str, Any]) -> LocatorConfig:
         height_m=height_m,
         ble_beacons=ble_beacons,
         ble_min_rssi_dbm=ble_min_rssi_dbm,
+        wifi_enabled=wifi_enabled,
+        ble_enabled=ble_enabled,
     )
 
 

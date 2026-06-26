@@ -75,6 +75,30 @@ def _inv_2x2(M: _Mat) -> _Mat:
 
 
 @dataclass
+class SignalFix:
+    """A position fix from any signal source (WiFi, BLE, …).
+
+    This is the common currency passed between signal-source methods and the
+    EKF update loop.  ``source`` identifies the signal type ("wifi" or "ble").
+    ``measurement_var_m2`` is the per-fix noise variance fed to
+    :meth:`PositionFilter.update`.  ``anchor_count`` is the number of anchors
+    (APs or beacons) that contributed.  ``method`` is a short human-readable
+    string describing the algorithm used (e.g. "centroid+fp",
+    "ble-trilateration").  ``metadata`` is a pass-through dict used by the
+    sensor model to build the full readings response (backend name, matched AP
+    list, fingerprint match details, etc.).
+    """
+
+    x_m: float
+    y_m: float
+    measurement_var_m2: float
+    source: str              # "wifi" | "ble"
+    anchor_count: int
+    method: str
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
 class MotionDelta:
     """Robot motion since the previous fix, in the WiFi floor-plan frame.
 

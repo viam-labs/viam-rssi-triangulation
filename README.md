@@ -6,14 +6,19 @@ Works with any WiFi access point (UniFi, Cisco, Aruba, consumer mesh, etc.) as l
 
 ## Requirements
 
-- Linux with a WiFi interface that can scan
-- AP locations (x, y coordinates from an origin point) on a floor plan in **meters**
-- BSSIDs that match what the radio actually reports for your `scan_ssid` (see [Matching BSSIDs](#matching-bssids))
-- **BLE beacon support** (optional): `pip install bleak` — required only when `ble_beacons` are configured
+- Linux device (e.g. an SBC)
+- At least one signal source configured:
+  - **WiFi** (the default): a WiFi interface that can scan + AP locations (x, y in meters) and BSSIDs (see [Matching BSSIDs](#matching-bssids))
+  - **BLE beacons**: `pip install bleak` + beacon positions and MAC addresses — can be used **alongside WiFi or on its own** without a WiFi interface
+- Both sources may be active simultaneously for independent cross-checked fixes
 
 ## Module config
 
-The sensor and `test_scan_rssi.py` use the same JSON (office example: `examples/module_config_viam-5g.json`):
+The sensor and `test_scan_rssi.py` use the same JSON (office example: `examples/module_config_viam-5g.json`).
+
+At least one signal source must be configured: provide `access_points` for WiFi, `ble_beacons` for BLE, or both. `scan_ssid` and `scan_count` are required only when `access_points` are present — a BLE-only config omits them entirely.
+
+**WiFi + BLE example:**
 
 ```json
 {
@@ -36,10 +41,33 @@ The sensor and `test_scan_rssi.py` use the same JSON (office example: `examples/
 }
 ```
 
+**BLE-only example** (no WiFi interface needed):
+
+```json
+{
+  "floor_plan": {
+    "x_origin_m": 0,
+    "y_origin_m": 0,
+    "device_z_m": 1.2
+  },
+  "ble_beacons": [
+    {
+      "name": "Beacon-A",
+      "x_m": 5.0,
+      "y_m": 3.0,
+      "z_m": 1.0,
+      "mac_address": "aa:bb:cc:11:22:33",
+      "tx_power_dbm": -59,
+      "path_loss_n": 2.5
+    }
+  ]
+}
+```
+
 | Field | Meaning |
 |-------|---------|
-| `scan_ssid` | Only use scan results from this network name |
-| `scan_count` | Number of scan passes to average per reading |
+| `scan_ssid` | Only use scan results from this network name (required when `access_points` is set) |
+| `scan_count` | Number of scan passes to average per reading (required when `access_points` is set) |
 | `access_points[].name` | Label (must match across scans) |
 | `access_points[].x_m`, `y_m` | AP position on your floor plan, in meters |
 | `access_points[].bssid` | MAC address of that AP’s radio for this SSID |
@@ -49,6 +77,8 @@ The sensor and `test_scan_rssi.py` use the same JSON (office example: `examples/
 | `floor_plan.width_m`, `height_m` | Optional floor extents in the reading frame; positions are clamped to `[0, width] × [0, height]` when set |
 | `ble_beacons` | Optional array of BLE beacons for additional ranging (see [BLE beacons](#ble-beacons)) |
 | `ble_min_rssi_dbm` | Drop BLE readings below this threshold (default: `-90`) |
+| `wifi_enabled` | `true` — set to `false` to disable WiFi even when `access_points` are configured (e.g. to test BLE-only) |
+| `ble_enabled` | `true` — set to `false` to disable BLE even when `ble_beacons` are configured |
 
 ## Methods
 
@@ -436,7 +466,7 @@ while stationary, lower it toward `1.0` if it feels sluggish to follow you.
 | `auto_calibrate_path_loss` | `true` | Periodically fit `tx_power_dbm` / `path_loss_n` from the fingerprint DB and apply in memory |
 | `path_loss_calibration_interval_s` | `3600` | Seconds between automatic path-loss calibrations |
 
-Other optional attributes: `interface`, `backend`, `scan_delay_s`, `strict_mac`, `tx_power_dbm`, `path_loss_n`, `fingerprint_db_path`, `fingerprint_k`, `fingerprint_min_common_aps`, `fingerprint_min_common_fraction`, `fingerprint_max_rms_db`, `ble_scan_interval_s`, `ble_measurement_noise_m2`, `imu_yaw_offset_deg`, `fusion_velocity_noise_mps`, `fusion_init_velocity_variance`.
+Other optional attributes: `interface`, `backend`, `scan_delay_s`, `strict_mac`, `tx_power_dbm`, `path_loss_n`, `fingerprint_db_path`, `fingerprint_k`, `fingerprint_min_common_aps`, `fingerprint_min_common_fraction`, `fingerprint_max_rms_db`, `ble_scan_interval_s`, `ble_measurement_noise_m2`, `wifi_enabled`, `ble_enabled`, `imu_yaw_offset_deg`, `fusion_velocity_noise_mps`, `fusion_init_velocity_variance`.
 
 Automatic calibration needs enough stored fingerprints (same minimum as `calibrate_path_loss`). Fits with implausible `tx_power_dbm` or `path_loss_n` are skipped. Applied values live until restart — copy fitted values into `tx_power_dbm` / `path_loss_n` in the config to make them permanent, or rely on auto-calibration to refresh them periodically.
 
@@ -606,7 +636,7 @@ Add a `ble_beacons` array to your config alongside `access_points`:
 
 **Notes:**
 
-- BLE beacons require **motion fusion** to be active — the BLE fix is applied as a second EKF update after the WiFi fix. If no motion sources are configured, BLE scanning still runs but the fix is not fused (configure at least one source or set `motion_fusion: true` explicitly).
+- BLE fixes are always computed and contribute to position. When **motion fusion** is active (at least one motion source configured), the BLE fix is fed into the EKF as a second independent update after the WiFi fix. When no motion sources are configured, the BLE and WiFi fixes are combined via inverse-variance weighted blending instead — BLE still improves position, just without the Kalman filter's gating and coasting.
 - With **one beacon visible**, a range circle is projected toward the current filter position to approximate `(x, y)`. With **two or more**, standard 3D trilateration is used.
 - `tx_power_dbm` and `path_loss_n` are per-beacon: calibrate each device by placing it at a known distance and adjusting until the estimated range matches. The iBeacon default (`-59 dBm`, `n=2.5`) is a reasonable starting point indoors.
 

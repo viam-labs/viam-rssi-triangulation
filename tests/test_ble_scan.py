@@ -14,7 +14,12 @@ from rssi_triangulation.ble_scan import (
     ble_rssi_to_distance_m,
     trilaterate_ble,
 )
-from rssi_triangulation.module_config import BleBeacon, LocatorConfig, ConfiguredAccessPoint
+from rssi_triangulation.module_config import (
+    BleBeacon,
+    LocatorConfig,
+    ConfiguredAccessPoint,
+    parse_config_dict,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +247,88 @@ def test_trilaterate_below_rssi_floor_filtered() -> None:
     snapshot = [_reading(b.mac_address, -100.0) for b in beacons]
     result = trilaterate_ble(snapshot, beacons, config, min_rssi_dbm=-90.0)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# BLE-only LocatorConfig (no access_points)
+# ---------------------------------------------------------------------------
+
+
+def test_ble_only_config_parses_without_access_points() -> None:
+    """parse_config_dict should succeed when only ble_beacons are configured."""
+    raw = {
+        "ble_beacons": [
+            {"name": "b1", "x_m": 0.0, "y_m": 0.0, "z_m": 1.0, "mac_address": "aa:bb:cc:dd:ee:01"},
+            {"name": "b2", "x_m": 10.0, "y_m": 0.0, "z_m": 1.0, "mac_address": "aa:bb:cc:dd:ee:02"},
+        ],
+        "floor_plan": {"width_m": 20.0, "height_m": 20.0},
+    }
+    config = parse_config_dict(raw)
+    assert len(config.ble_beacons) == 2
+    assert config.access_points == ()
+    assert config.scan_ssid == ""
+    assert config.wifi_enabled is True   # flag default; no APs → effectively disabled
+    assert config.ble_enabled is True
+
+
+def test_ble_only_config_wifi_enabled_flag_respected() -> None:
+    """Explicit wifi_enabled=False is stored on LocatorConfig."""
+    raw = {
+        "access_points": [
+            {"name": "ap1", "x_m": 0.0, "y_m": 0.0, "z_m": 2.4,
+             "bssid": "aa:bb:cc:dd:ee:ff"},
+        ],
+        "scan_ssid": "corp",
+        "scan_count": 3,
+        "ble_beacons": [
+            {"name": "b1", "x_m": 5.0, "y_m": 0.0, "z_m": 1.0, "mac_address": "aa:bb:cc:dd:ee:01"},
+        ],
+        "wifi_enabled": False,
+    }
+    config = parse_config_dict(raw)
+    assert config.wifi_enabled is False
+    assert config.ble_enabled is True
+
+
+def test_neither_source_raises() -> None:
+    """Configuring neither APs nor beacons must raise ValueError."""
+    with pytest.raises(ValueError, match="at least one signal source"):
+        parse_config_dict({"floor_plan": {}})
+
+
+def test_ble_only_trilaterate_three_beacons_no_aps() -> None:
+    """Trilateration works correctly using a LocatorConfig with no access_points."""
+    config = parse_config_dict({
+        "ble_beacons": [
+            {"name": "b1", "x_m":  0.0, "y_m":  0.0, "z_m": 1.0,
+             "mac_address": "aa:bb:cc:dd:ee:01", "path_loss_n": 2.0},
+            {"name": "b2", "x_m": 20.0, "y_m":  0.0, "z_m": 1.0,
+             "mac_address": "aa:bb:cc:dd:ee:02", "path_loss_n": 2.0},
+            {"name": "b3", "x_m": 10.0, "y_m": 20.0, "z_m": 1.0,
+             "mac_address": "aa:bb:cc:dd:ee:03", "path_loss_n": 2.0},
+        ],
+        "floor_plan": {"width_m": 20.0, "height_m": 20.0},
+    })
+    beacons = config.ble_beacons
+    true_x, true_y = 8.0, 6.0
+    device_z = config.device_z_m
+
+    readings = []
+    for b in beacons:
+        d = math.sqrt(
+            (b.x_m - true_x) ** 2
+            + (b.y_m - true_y) ** 2
+            + (b.z_m - device_z) ** 2
+        )
+        rssi = b.tx_power_dbm - 10.0 * b.path_loss_n * math.log10(max(d, 0.01))
+        readings.append(BleReading(mac=b.mac_address, rssi_dbm=rssi, name="",
+                                   timestamp_s=time.monotonic()))
+
+    result = trilaterate_ble(readings, beacons, config, device_z_m=device_z)
+    assert result is not None
+    x, y = result
+    assert abs(x - true_x) < 0.5, f"x error {abs(x - true_x):.2f} m"
+    assert abs(y - true_y) < 0.5, f"y error {abs(y - true_y):.2f} m"
 
 
 def test_trilaterate_with_floor_origin_offset() -> None:

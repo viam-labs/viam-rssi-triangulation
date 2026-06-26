@@ -1,4 +1,9 @@
-"""Viam sensor: WiFi RSSI floor position with IMU + optional BLE fusion."""
+"""Viam sensor: WiFi/BLE RSSI floor position with optional IMU fusion.
+
+Both WiFi and BLE are first-class, independently optional signal sources.
+Configure ``access_points`` to enable WiFi, ``ble_beacons`` to enable BLE,
+or both.  IMU / SLAM motion sources remain fully optional.
+"""
 
 from __future__ import annotations
 
@@ -33,6 +38,7 @@ from rssi_triangulation.fingerprint_session import get_fingerprint_session_manag
 from rssi_triangulation.fusion import (
     MotionDelta,
     PositionFilter,
+    SignalFix,
     measurement_var_from_fix,
     slam_pose_delta,
 )
@@ -55,7 +61,7 @@ from rssi_triangulation.module_config import (
 
 MODEL: ClassVar[Model] = Model(
     ModelFamily("viam-labs", "rssi-triangulation"),
-    "wifi-position",
+    "position",
 )
 
 
@@ -142,6 +148,8 @@ class RssiPositionSensor(Sensor, EasyResource):
     _imu_yaw_offset_deg: float
     _last_motion_time: float | None
     _last_slam_xy_mm: tuple[float, float] | None
+    _wifi_enabled: bool
+    _ble_enabled: bool
     _scanner: BackgroundScanner | None
     # BLE
     _ble_scanner: BackgroundBleScanner | None
@@ -340,13 +348,28 @@ class RssiPositionSensor(Sensor, EasyResource):
         sensor._last_motion_time = None
         sensor._last_slam_xy_mm = None
 
-        # WiFi background scanner (on by default)
+        # Determine which signal sources are active.
+        # Auto-detect from configured items; explicit flags allow override.
+        sensor._wifi_enabled = (
+            bool(sensor._config.access_points) and sensor._config.wifi_enabled
+        )
+        sensor._ble_enabled = (
+            bool(sensor._config.ble_beacons) and sensor._config.ble_enabled
+        )
+        if not sensor._wifi_enabled and not sensor._ble_enabled:
+            raise ValueError(
+                "No signal sources are active. Configure 'access_points' for WiFi, "
+                "'ble_beacons' for BLE, or both (and ensure the corresponding "
+                "'wifi_enabled' / 'ble_enabled' flags are not set to false)."
+            )
+
+        # WiFi background scanner (only when WiFi is enabled)
         background_scan = (
             fields["background_scan"].bool_value
             if "background_scan" in fields
             else True
         )
-        if background_scan:
+        if sensor._wifi_enabled and background_scan:
             sensor._scanner = BackgroundScanner(
                 interface=sensor._interface,
                 network=sensor._config.scan_ssid,
@@ -373,13 +396,13 @@ class RssiPositionSensor(Sensor, EasyResource):
         else:
             sensor._scanner = None
 
-        # BLE background scanner (only when beacons are configured)
+        # BLE background scanner (only when BLE is enabled)
         sensor._ble_measurement_noise_m2 = (
             fields["ble_measurement_noise_m2"].number_value
             if "ble_measurement_noise_m2" in fields
             else 6.0
         )
-        if sensor._config.ble_beacons:
+        if sensor._ble_enabled:
             ble_interval_s = (
                 fields["ble_scan_interval_s"].number_value
                 if "ble_scan_interval_s" in fields
@@ -584,7 +607,11 @@ class RssiPositionSensor(Sensor, EasyResource):
         )
 
     def _locate_from_buffer(self):
-        """Estimate position from the background scanner's rolling buffer."""
+        """Estimate position from the background scanner's rolling buffer.
+
+        Returns ``(position, backend, aggregated_readings, scans, method, fp_match)``.
+        Raises ``RuntimeError`` when no samples are available yet.
+        """
         scanner = self._scanner
         assert scanner is not None
         if not scanner.wait_for_samples(timeout_s=10.0):
@@ -625,6 +652,158 @@ class RssiPositionSensor(Sensor, EasyResource):
         )
         return position, backend, aggregated, scans, method_used, fp_match
 
+    def _get_wifi_fix_sync(self) -> SignalFix | None:
+        """Return a WiFi position fix, or ``None`` when no samples are ready.
+
+        Synchronous — intended to be called via ``asyncio.to_thread``.  All
+        WiFi-specific data needed to build the full readings response is
+        stored in ``SignalFix.metadata`` so the caller does not need to reach
+        back into WiFi-only internals.
+        """
+        try:
+            if self._scanner is not None:
+                raw_xy, backend, aggregated, scans, method_used, fp_match = (
+                    self._locate_from_buffer()
+                )
+            else:
+                raw_xy, backend, aggregated, scans, method_used, fp_match = (
+                    locate_position(
+                        self._config,
+                        device_z_m=self._device_z_m,
+                        interface=self._interface,
+                        backend=self._backend,
+                        scan_delay_s=self._scan_delay_s,
+                        blocking=self._blocking_scan,
+                        strict_mac=self._strict_mac,
+                        min_anchors=self._min_anchors,
+                        max_rssi_delta_db=self._max_rssi_delta_db,
+                        min_rssi_dbm=self._min_rssi_dbm,
+                        min_samples_per_ap=self._min_samples_per_ap,
+                        tx_power_dbm=self._tx_power_dbm,
+                        path_loss_n=self._path_loss_n,
+                        weight_temperature=self._weight_temperature,
+                        fingerprint_store=self._get_fingerprint_store(),
+                        fingerprint_k=self._fingerprint_k,
+                        fingerprint_min_common_aps=self._fingerprint_min_common_aps,
+                        fingerprint_min_common_fraction=self._fingerprint_min_common_fraction,
+                        fingerprint_max_rms_db=self._fingerprint_max_rms_db,
+                        fingerprint_max_blend=self._fingerprint_max_blend,
+                        fast_scan=self._fast_scan,
+                    )
+                )
+        except RuntimeError:
+            return None
+
+        min_samples = self._min_samples_per_ap
+        if min_samples is None:
+            min_samples = 2 if scans >= 3 else 1
+        matched = match_readings_to_aps(
+            aggregated,
+            registry_from_config(self._config),
+            strict_mac=self._strict_mac,
+            min_sample_count=min_samples,
+        )
+
+        meas_var = measurement_var_from_fix(
+            base_noise_m=self._fusion_measurement_noise_m,
+            anchor_count=len(matched),
+            fp_blend_weight=fp_match.blend_weight if fp_match is not None else 0.0,
+        )
+
+        return SignalFix(
+            x_m=raw_xy.x_m,
+            y_m=raw_xy.y_m,
+            measurement_var_m2=meas_var,
+            source="wifi",
+            anchor_count=len(matched),
+            method=method_used,
+            metadata={
+                "backend": backend,
+                "aggregated": aggregated,
+                "scans": scans,
+                "matched": matched,
+                "fp_match": fp_match,
+                "raw_position": raw_xy,
+            },
+        )
+
+    def _get_ble_fix_sync(
+        self,
+        prior_x: float,
+        prior_y: float,
+    ) -> SignalFix | None:
+        """Return a BLE trilateration fix, or ``None`` when no beacons are in range.
+
+        Synchronous — safe to call on the calling thread (no blocking I/O; just
+        reads the already-running scanner's in-memory buffer).
+        """
+        if self._ble_scanner is None or not self._config.ble_beacons:
+            return None
+
+        ble_snapshot = self._ble_scanner.snapshot()
+        beacon_count = beacon_count_from_snapshot(
+            ble_snapshot,
+            self._config.ble_beacons,
+            min_rssi_dbm=self._config.ble_min_rssi_dbm,
+        )
+        ble_xy = trilaterate_ble(
+            ble_snapshot,
+            self._config.ble_beacons,
+            self._config,
+            device_z_m=self._device_z_m,
+            min_rssi_dbm=self._config.ble_min_rssi_dbm,
+            prior_x=prior_x,
+            prior_y=prior_y,
+        )
+        if ble_xy is None:
+            return None
+
+        return SignalFix(
+            x_m=ble_xy[0],
+            y_m=ble_xy[1],
+            measurement_var_m2=self._ble_measurement_noise_m2,
+            source="ble",
+            anchor_count=beacon_count,
+            method="ble-trilateration",
+            metadata={"beacon_count": beacon_count},
+        )
+
+    def _blend_fixes_no_ekf(self, fixes: list[SignalFix]) -> PositionReading:
+        """Produce a smoothed ``PositionReading`` when the EKF is disabled.
+
+        Single fix: apply exponential smoothing / step clamp against the last
+        position.  Multiple fixes: compute a variance-weighted average first,
+        then smooth the result.  Returns the last known position (or the floor
+        origin) when no fixes are available.
+        """
+        if not fixes:
+            if self._last_position is not None:
+                return self._last_position
+            return PositionReading(x_m=0.0, y_m=0.0, z_m=self._device_z_m)
+
+        if len(fixes) == 1:
+            raw = PositionReading(
+                x_m=fixes[0].x_m,
+                y_m=fixes[0].y_m,
+                z_m=self._device_z_m,
+            )
+        else:
+            # Inverse-variance weighting: trust tighter fixes more
+            weights = [1.0 / max(f.measurement_var_m2, 1e-6) for f in fixes]
+            total_w = sum(weights)
+            x = sum(w * f.x_m for w, f in zip(weights, fixes)) / total_w
+            y = sum(w * f.y_m for w, f in zip(weights, fixes)) / total_w
+            raw = PositionReading(x_m=x, y_m=y, z_m=self._device_z_m)
+
+        return smooth_position(
+            self._last_position,
+            raw,
+            alpha=self._smoothing_alpha,
+            max_step_m=(
+                None if self._max_position_step_m <= 0 else self._max_position_step_m
+            ),
+        )
+
     async def get_readings(
         self,
         *,
@@ -633,65 +812,77 @@ class RssiPositionSensor(Sensor, EasyResource):
         **kwargs,
     ) -> Mapping[str, SensorReading]:
         del extra, timeout, kwargs
-        await asyncio.to_thread(self._maybe_auto_calibrate_path_loss)
-        if self._scanner is not None:
-            (
-                raw_xy,
-                backend,
-                readings,
-                scans,
-                method_used,
-                fp_match,
-            ) = await asyncio.to_thread(self._locate_from_buffer)
-        else:
-            raw_xy, backend, readings, scans, method_used, fp_match = await asyncio.to_thread(
-                locate_position,
-                self._config,
-                device_z_m=self._device_z_m,
-                interface=self._interface,
-                backend=self._backend,
-                scan_delay_s=self._scan_delay_s,
-                blocking=self._blocking_scan,
-                strict_mac=self._strict_mac,
-                min_anchors=self._min_anchors,
-                max_rssi_delta_db=self._max_rssi_delta_db,
-                min_rssi_dbm=self._min_rssi_dbm,
-                min_samples_per_ap=self._min_samples_per_ap,
-                tx_power_dbm=self._tx_power_dbm,
-                path_loss_n=self._path_loss_n,
-                weight_temperature=self._weight_temperature,
-                fingerprint_store=self._get_fingerprint_store(),
-                fingerprint_k=self._fingerprint_k,
-                fingerprint_min_common_aps=self._fingerprint_min_common_aps,
-                fingerprint_min_common_fraction=self._fingerprint_min_common_fraction,
-                fingerprint_max_rms_db=self._fingerprint_max_rms_db,
-                fingerprint_max_blend=self._fingerprint_max_blend,
-                fast_scan=self._fast_scan,
-            )
-        raw_position = raw_xy
-        matched = match_readings_to_aps(
-            readings,
-            registry_from_config(self._config),
-            strict_mac=self._strict_mac,
-            min_sample_count=self._min_samples_per_ap or (2 if scans >= 3 else 1),
-        )
-        get_fingerprint_session_manager().ingest_matched(
-            matched,
-            prior_xy=geometric_centroid_xy(
-                self._config,
-                matched,
-                device_z_m=self._device_z_m,
-                min_anchors=2,
-                max_rssi_delta_db=self._max_rssi_delta_db,
-                min_rssi_dbm=self._min_rssi_dbm,
-                tx_power_dbm=self._tx_power_dbm,
-                path_loss_n=self._path_loss_n,
-                weight_temperature=self._weight_temperature,
-            ),
-        )
 
-        motion_detail = ""
+        if self._wifi_enabled:
+            await asyncio.to_thread(self._maybe_auto_calibrate_path_loss)
+
+        # ------------------------------------------------------------------ #
+        # Collect fixes from all active signal sources
+        # ------------------------------------------------------------------ #
+        fixes: list[SignalFix] = []
+
+        # --- WiFi fix ---
+        wifi_meta: dict[str, Any] = {}
+        if self._wifi_enabled:
+            wifi_fix = await asyncio.to_thread(self._get_wifi_fix_sync)
+            if wifi_fix is not None:
+                fixes.append(wifi_fix)
+                wifi_meta = wifi_fix.metadata
+                # Fingerprint session ingestion is WiFi-specific
+                matched = wifi_meta.get("matched", [])
+                get_fingerprint_session_manager().ingest_matched(
+                    matched,
+                    prior_xy=geometric_centroid_xy(
+                        self._config,
+                        matched,
+                        device_z_m=self._device_z_m,
+                        min_anchors=2,
+                        max_rssi_delta_db=self._max_rssi_delta_db,
+                        min_rssi_dbm=self._min_rssi_dbm,
+                        tx_power_dbm=self._tx_power_dbm,
+                        path_loss_n=self._path_loss_n,
+                        weight_temperature=self._weight_temperature,
+                    ),
+                )
+
+        # --- BLE fix ---
+        # Prior for single-beacon fallback: use stale filter position, last
+        # known position, or the WiFi fix (in decreasing preference).
         ble_detail: dict[str, Any] = {}
+        if self._ble_enabled and self._ble_scanner is not None:
+            prior: tuple[float, float] | None = self._position_filter.position if (
+                self._position_filter is not None
+            ) else None
+            if prior is None and self._last_position is not None:
+                prior = (self._last_position.x_m, self._last_position.y_m)
+            if prior is None and fixes:
+                prior = (fixes[0].x_m, fixes[0].y_m)
+            prior_x = prior[0] if prior is not None else 0.0
+            prior_y = prior[1] if prior is not None else 0.0
+
+            ble_fix = self._get_ble_fix_sync(prior_x, prior_y)
+            if ble_fix is not None:
+                fixes.append(ble_fix)
+                ble_detail = {
+                    "x": ble_fix.x_m,
+                    "y": ble_fix.y_m,
+                    "beacon_count": ble_fix.metadata.get("beacon_count", 0),
+                    "accepted": True,  # updated below if EKF gates it
+                }
+            else:
+                ble_detail = {
+                    "beacon_count": beacon_count_from_snapshot(
+                        self._ble_scanner.snapshot(),
+                        self._config.ble_beacons,
+                        min_rssi_dbm=self._config.ble_min_rssi_dbm,
+                    ),
+                    "accepted": False,
+                }
+
+        # ------------------------------------------------------------------ #
+        # Fuse fixes — EKF path or simple smoothing fallback
+        # ------------------------------------------------------------------ #
+        motion_detail = ""
 
         if self._position_filter is not None:
             now = monotonic()
@@ -702,84 +893,64 @@ class RssiPositionSensor(Sensor, EasyResource):
             )
             self._last_motion_time = now
 
-            # --- Predict step (IMU / SLAM) ---
             motion = await self._read_motion(dt)
             self._position_filter.predict(motion, dt)
 
-            # --- WiFi update step ---
-            meas_var = measurement_var_from_fix(
-                base_noise_m=self._fusion_measurement_noise_m,
-                anchor_count=len(matched),
-                fp_blend_weight=fp_match.blend_weight if fp_match is not None else 0.0,
-            )
-            wifi_accepted = self._position_filter.update(
-                raw_position.x_m,
-                raw_position.y_m,
-                measurement_var_m2=meas_var,
-                max_innovation_m=self._fusion_max_innovation_m,
-            )
+            accepted_by_source: dict[str, bool] = {}
+            for fix in fixes:
+                accepted = self._position_filter.update(
+                    fix.x_m,
+                    fix.y_m,
+                    measurement_var_m2=fix.measurement_var_m2,
+                    max_innovation_m=self._fusion_max_innovation_m,
+                )
+                accepted_by_source[fix.source] = accepted
 
-            # --- BLE update step (optional second correction) ---
-            ble_accepted = False
-            ble_beacon_count = 0
-            if self._ble_scanner is not None and self._config.ble_beacons:
-                ble_snapshot = self._ble_scanner.snapshot()
-                ble_beacon_count = beacon_count_from_snapshot(
-                    ble_snapshot,
-                    self._config.ble_beacons,
-                    min_rssi_dbm=self._config.ble_min_rssi_dbm,
-                )
-                # Use current filter position as the prior for single-beacon fallback
-                prior_pos = self._position_filter.position
-                ble_fix = trilaterate_ble(
-                    ble_snapshot,
-                    self._config.ble_beacons,
-                    self._config,
-                    device_z_m=self._device_z_m,
-                    min_rssi_dbm=self._config.ble_min_rssi_dbm,
-                    prior_x=prior_pos[0] if prior_pos else raw_position.x_m,
-                    prior_y=prior_pos[1] if prior_pos else raw_position.y_m,
-                )
-                if ble_fix is not None:
-                    ble_accepted = self._position_filter.update(
-                        ble_fix[0],
-                        ble_fix[1],
-                        measurement_var_m2=self._ble_measurement_noise_m2,
-                        max_innovation_m=self._fusion_max_innovation_m,
-                    )
-                    ble_detail = {
-                        "x": ble_fix[0],
-                        "y": ble_fix[1],
-                        "beacon_count": ble_beacon_count,
-                        "accepted": ble_accepted,
-                    }
-                else:
-                    ble_detail = {
-                        "beacon_count": ble_beacon_count,
-                        "accepted": False,
-                    }
+            if "ble" in accepted_by_source and ble_detail:
+                ble_detail["accepted"] = accepted_by_source["ble"]
 
             fused = self._position_filter.position
-            position = (
-                PositionReading(x_m=fused[0], y_m=fused[1], z_m=raw_position.z_m)
+            raw_pos = wifi_meta.get("raw_position")
+            z_m = raw_pos.z_m if raw_pos is not None else self._device_z_m
+            position: PositionReading = (
+                PositionReading(x_m=fused[0], y_m=fused[1], z_m=z_m)
                 if fused is not None
-                else raw_position
+                else (
+                    PositionReading(x_m=fixes[0].x_m, y_m=fixes[0].y_m, z_m=z_m)
+                    if fixes
+                    else PositionReading(x_m=0.0, y_m=0.0, z_m=z_m)
+                )
             )
+
+            wifi_ok = accepted_by_source.get("wifi")
+            ble_ok = accepted_by_source.get("ble")
+            ble_count = ble_detail.get("beacon_count", 0) if ble_detail else 0
             motion_detail = (
                 f", motion[{'+'.join(motion.sources) or 'none'}]"
-                f" v={motion.speed_mps:.2f}m/s{'' if wifi_accepted else ' wifi-gated'}"
-                + (f" ble={ble_beacon_count}b{'✓' if ble_accepted else '✗'}" if ble_detail else "")
+                f" v={motion.speed_mps:.2f}m/s"
+                + (f" wifi={'✓' if wifi_ok else '✗'}" if wifi_ok is not None else "")
+                + (
+                    f" ble={ble_count}b{'✓' if ble_ok else '✗'}"
+                    if ble_ok is not None
+                    else ""
+                )
             )
         else:
-            position = smooth_position(
-                self._last_position,
-                raw_position,
-                alpha=self._smoothing_alpha,
-                max_step_m=(
-                    None if self._max_position_step_m <= 0 else self._max_position_step_m
-                ),
-            )
+            position = self._blend_fixes_no_ekf(fixes)
+
         self._last_position = position
+
+        # ------------------------------------------------------------------ #
+        # Build readings dict
+        # ------------------------------------------------------------------ #
+        matched = wifi_meta.get("matched", [])
+        fp_match = wifi_meta.get("fp_match")
+        backend = wifi_meta.get("backend", "ble-only" if self._ble_enabled else "none")
+        aggregated = wifi_meta.get("aggregated", [])
+        scans = wifi_meta.get("scans", 0)
+        raw_position = wifi_meta.get("raw_position", position)
+        method_used = " + ".join(f.method for f in fixes) or "none"
+
         fp_detail = ""
         if fp_match is not None:
             blend = (
@@ -791,8 +962,10 @@ class RssiPositionSensor(Sensor, EasyResource):
                 f", fp={fp_match.label} rms={fp_match.distance_db:.1f}dB"
                 f"{blend} neighbors={','.join(fp_match.neighbors)}"
             )
+
         self.logger.debug(
-            "position (%.2f, %.2f, %.2f) m raw (%.2f, %.2f) via %s (%s%s%s), %d BSSIDs on SSID, %d scans",
+            "position (%.2f, %.2f, %.2f) m raw (%.2f, %.2f) via %s (%s%s%s),"
+            " %d BSSIDs on SSID, %d scans",
             position.x_m,
             position.y_m,
             position.z_m,
@@ -802,10 +975,11 @@ class RssiPositionSensor(Sensor, EasyResource):
             method_used,
             fp_detail,
             motion_detail,
-            len(readings),
+            len(aggregated),
             scans,
         )
-        fp_store = self._get_fingerprint_store()
+
+        fp_store = self._get_fingerprint_store() if self._wifi_enabled else None
         rankings = (
             fingerprint_rankings_from_matched(
                 fp_store,
@@ -822,20 +996,26 @@ class RssiPositionSensor(Sensor, EasyResource):
                 path_loss_n=self._path_loss_n,
                 weight_temperature=self._weight_temperature,
             )
-            if fp_store.count() > 0
+            if fp_store is not None and fp_store.count() > 0
             else None
         )
-        result = build_readings_dict(
-            position,
-            matched,
-            self._config,
-            method=method_used,
-            fp_match=fp_match,
-            fingerprint_rankings=rankings,
+
+        result = dict(
+            build_readings_dict(
+                position,
+                matched,
+                self._config,
+                method=method_used,
+                fp_match=fp_match,
+                fingerprint_rankings=rankings,
+            )
         )
+
+        # Augment with active signal-source metadata
+        result["signal_sources"] = [f.source for f in fixes]
         if ble_detail:
-            result = dict(result)
             result["ble_fix"] = ble_detail
+
         return result
 
     async def do_command(
