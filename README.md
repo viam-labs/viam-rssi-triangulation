@@ -9,7 +9,7 @@ Works with any WiFi access point (UniFi, Cisco, Aruba, consumer mesh, etc.) as l
 - Linux device (e.g. an SBC)
 - At least one signal source configured:
   - **WiFi** (the default): a WiFi interface that can scan + AP locations (x, y in meters) and BSSIDs (see [Matching BSSIDs](#matching-bssids))
-  - **BLE beacons**: `pip install bleak` + beacon positions and MAC addresses — can be used **alongside WiFi or on its own** without a WiFi interface
+  - **BLE beacons**: beacon positions and MAC addresses — can be used **alongside WiFi or on its own** without a WiFi interface
 - Both sources may be active simultaneously for independent cross-checked fixes
 
 ## Module config
