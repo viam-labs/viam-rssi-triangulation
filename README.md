@@ -6,13 +6,19 @@ Works with any WiFi access point (UniFi, Cisco, Aruba, consumer mesh, etc.) as l
 
 ## Requirements
 
-- Linux with a WiFi interface that can scan
-- AP locations (x, y coordinates from an origin point) on a floor plan in **meters**
-- BSSIDs that match what the radio actually reports for your `scan_ssid` (see [Matching BSSIDs](#matching-bssids))
+- Linux device (e.g. an SBC)
+- At least one signal source configured:
+  - **WiFi** (the default): a WiFi interface that can scan + AP locations (x, y in meters) and BSSIDs (see [Matching BSSIDs](#matching-bssids))
+  - **BLE beacons**: beacon positions and MAC addresses — can be used **alongside WiFi or on its own** without a WiFi interface
+- Both sources may be active simultaneously for independent cross-checked fixes
 
 ## Module config
 
-The sensor and `test_scan_rssi.py` use the same JSON (office example: `examples/module_config_viam-5g.json`):
+The sensor and `test_scan_rssi.py` use the same JSON (office example: `examples/module_config_viam-5g.json`).
+
+At least one signal source must be configured: provide `access_points` for WiFi, `ble_beacons` for BLE, or both. `scan_ssid` and `scan_count` are required only when `access_points` are present — a BLE-only config omits them entirely.
+
+**WiFi + BLE example:**
 
 ```json
 {
@@ -35,16 +41,44 @@ The sensor and `test_scan_rssi.py` use the same JSON (office example: `examples/
 }
 ```
 
+**BLE-only example** (no WiFi interface needed):
+
+```json
+{
+  "floor_plan": {
+    "x_origin_m": 0,
+    "y_origin_m": 0,
+    "device_z_m": 1.2
+  },
+  "ble_beacons": [
+    {
+      "name": "Beacon-A",
+      "x_m": 5.0,
+      "y_m": 3.0,
+      "z_m": 1.0,
+      "mac_address": "aa:bb:cc:11:22:33",
+      "tx_power_dbm": -59,
+      "path_loss_n": 2.5
+    }
+  ]
+}
+```
+
 | Field | Meaning |
 |-------|---------|
-| `scan_ssid` | Only use scan results from this network name |
-| `scan_count` | Number of scan passes to average per reading |
+| `scan_ssid` | Only use scan results from this network name (required when `access_points` is set) |
+| `scan_count` | Number of scan passes to average per reading (required when `access_points` is set) |
 | `access_points[].name` | Label (must match across scans) |
 | `access_points[].x_m`, `y_m` | AP position on your floor plan, in meters |
 | `access_points[].bssid` | MAC address of that AP’s radio for this SSID |
 | `floor_plan.x_origin_m`, `y_origin_m` | Subtracted from the estimated position (usually `0`) |
 | `floor_plan.device_z_m` (or top-level `device_z_m`) | Antenna height above floor, in meters (`0`); used in 3D range math |
 | `floor_plan.access_point_z_m` (or top-level) | Default AP mount height; per-AP override with `access_points[].z_m` |
+| `floor_plan.width_m`, `height_m` | Optional floor extents in the reading frame; positions are clamped to `[0, width] × [0, height]` when set |
+| `ble_beacons` | Optional array of BLE beacons for additional ranging (see [BLE beacons](#ble-beacons)) |
+| `ble_min_rssi_dbm` | Drop BLE readings below this threshold (default: `-90`) |
+| `wifi_enabled` | `true` — set to `false` to disable WiFi even when `access_points` are configured (e.g. to test BLE-only) |
+| `ble_enabled` | `true` — set to `false` to disable BLE even when `ble_beacons` are configured |
 
 ## Methods
 
@@ -88,11 +122,19 @@ Scans WiFi, estimates position, and returns coordinates in the configured floor-
   "fingerprint_rankings": [
     { "label": "Matt Desk", "distance_db": 4.2, "common_aps": 6, "positioned": false },
     { "label": "Lobby", "distance_db": 11.8, "common_aps": 5, "positioned": true }
-  ]
+  ],
+  "ble_fix": {
+    "x": 12.1,
+    "y": 56.4,
+    "beacon_count": 2,
+    "accepted": true
+  }
 }
 ```
 
 When a fingerprint DB is configured, **`nearest_fingerprint`** is the best RSSI match (lowest `distance_db` RMS). **`fingerprint_rankings`** lists the top matches. RSSI-only fingerprints (`positioned: false`) participate in matching but do not pull `(x, y)` unless they have floor coordinates.
+
+When BLE beacons are configured and motion fusion is active, **`ble_fix`** appears in the response: `x`/`y` is the raw BLE trilateration result (in the same reading frame as `location`), `beacon_count` is the number of configured beacons visible above `ble_min_rssi_dbm`, and `accepted` indicates whether the Kalman filter accepted or gated the fix.
 
 `location.z` is the device/antenna height above the floor (from `device_z_m` in config, or updated at runtime via **`set_device_z_m`**). Positioning uses **3D slant range** when AP and device heights differ: standing under a ceiling AP no longer looks meters away in x/y just because the radio is 2.5 m above you. `access_points` lists configured APs heard on this scan, **strongest RSSI first**. Each `x` / `y` / `z` is the offset from your estimated position to that AP (AP position minus current position), in meters — not absolute floor coordinates.
 
@@ -424,7 +466,7 @@ while stationary, lower it toward `1.0` if it feels sluggish to follow you.
 | `auto_calibrate_path_loss` | `true` | Periodically fit `tx_power_dbm` / `path_loss_n` from the fingerprint DB and apply in memory |
 | `path_loss_calibration_interval_s` | `3600` | Seconds between automatic path-loss calibrations |
 
-Other optional attributes: `interface`, `backend`, `scan_delay_s`, `strict_mac`, `tx_power_dbm`, `path_loss_n`, `fingerprint_db_path`, `fingerprint_k`, `fingerprint_min_common_aps`, `fingerprint_min_common_fraction`, `fingerprint_max_rms_db`.
+Other optional attributes: `interface`, `backend`, `scan_delay_s`, `strict_mac`, `tx_power_dbm`, `path_loss_n`, `fingerprint_db_path`, `fingerprint_k`, `fingerprint_min_common_aps`, `fingerprint_min_common_fraction`, `fingerprint_max_rms_db`, `ble_scan_interval_s`, `ble_measurement_noise_m2`, `wifi_enabled`, `ble_enabled`, `imu_yaw_offset_deg`, `fusion_velocity_noise_mps`, `fusion_init_velocity_variance`.
 
 Automatic calibration needs enough stored fingerprints (same minimum as `calibrate_path_loss`). Fits with implausible `tx_power_dbm` or `path_loss_n` are skipped. Applied values live until restart — copy fitted values into `tx_power_dbm` / `path_loss_n` in the config to make them permanent, or rely on auto-calibration to refresh them periodically.
 
@@ -478,12 +520,19 @@ sudo python3 test_scan_rssi.py --config examples/module_config_viam-5g.json \
 
 A WiFi RSSI fix is a noisy, biased absolute position; a robot's own motion is
 smooth and locally accurate but drifts. When you name one or more **optional**
-motion sources, `get_readings()` fuses them with the WiFi fix in an adaptive
-2D Kalman filter: it predicts from motion between scans and corrects with each
-fix, so the position barely moves while the robot is stationary and tracks
-quickly while driving. Fixes that disagree with the prediction by more than
-`fusion_max_innovation_m` are rejected as outliers (after several consecutive
-rejections the filter re-seeds, so it still recovers if the robot is moved).
+motion sources, `get_readings()` fuses them with the WiFi fix in a **4-state
+Extended Kalman Filter** (EKF, state `[x, y, vx, vy]`): it predicts from
+motion between scans and corrects with each fix, so the position barely moves
+while the robot is stationary and tracks quickly while driving. Fixes that
+disagree with the prediction by more than `fusion_max_innovation_m` **or** whose
+Mahalanobis distance exceeds the chi-squared 95th-percentile gate (2 DOF) are
+rejected as outliers — after several consecutive rejections the filter re-seeds,
+so it still recovers if the robot is moved.
+
+When BLE beacons are configured, the BLE trilateration fix is fed to the filter
+as an **independent second update** on every reading where enough beacons are
+visible (subject to the same gating). The filter effectively cross-checks WiFi
+and BLE, and can track position even when one source is temporarily unreliable.
 
 All three sources are optional and independent — configure none (filter off,
 behaves exactly as before), one, or several. Each is the **resource name** of a
@@ -511,9 +560,12 @@ component/service already on the machine:
 | `fusion_measurement_noise_m` | `3.0` | Assumed WiFi fix error; auto-tightened by anchor count and fingerprint confidence |
 | `fusion_max_innovation_m` | `8.0` | Reject a fix that jumps more than this from the prediction (`0` disables gating) |
 | `fusion_speed_scale` | `1.0` | How strongly motion speed loosens smoothing |
+| `fusion_velocity_noise_mps` | `0.1` | EKF velocity state noise per second (4-state model) |
+| `fusion_init_velocity_variance` | `0.25` | Initial velocity state variance (m²/s²) at filter seed |
 | `base_moving_speed_mps` | `0.5` | Assumed speed when only a base reports `is_moving` (no velocity source) |
 | `slam_yaw_offset_deg` | `0.0` | Rotate the SLAM motion delta into the floor frame if the SLAM map is rotated |
 | `slam_scale` | `1.0` | Scale correction if SLAM units don't match the floor plan |
+| `imu_yaw_offset_deg` | `0.0` | IMU mounting offset relative to the floor plan (degrees, CCW positive); used when orientation is unavailable |
 
 Notes:
 
@@ -524,10 +576,69 @@ Notes:
 - A **base** has no odometry in the Viam API, so it acts only as a moving/stopped
   gate. For true wheel odometry, configure a `wheeled-odometry` **movement
   sensor** and name it under `movement_sensor`.
+- The **movement sensor** now contributes floor-frame velocity by combining
+  `get_linear_velocity()` with `get_orientation()` (yaw). If the IMU is mounted
+  at an angle relative to the floor plan, set `imu_yaw_offset_deg` to rotate its
+  readings into the floor frame. When orientation is unavailable (encoder-only
+  sensors), only the scalar speed is used.
+- The 4-state EKF tracks `(x, y, vx, vy)`: velocity states propagate between
+  fixes so the estimate coasts smoothly during brief WiFi dropouts.
 - When motion fusion is active it replaces the simpler `smoothing_alpha` /
   `max_position_step_m` filter; those still apply when no motion source is set.
 - Each motion read is best-effort: if a source errors, it is logged and skipped
   for that reading rather than failing the position.
+
+### BLE beacons
+
+BLE beacons (iBeacon, Eddystone, or any Bluetooth LE device that advertises RSSI) can supplement WiFi ranging. A background BLE scanner thread collects advertisements continuously; `get_readings()` trilaterate a fix from visible beacons and feeds it into the motion fusion EKF as a second independent correction.
+
+`bleak` is included in `requirements.txt` and installed automatically. It is only active when `ble_beacons` is non-empty; the module runs normally for WiFi-only use without any BLE configuration.
+
+Add a `ble_beacons` array to your config alongside `access_points`:
+
+```json
+{
+  "scan_ssid": "MyNetwork",
+  "scan_count": 5,
+  "floor_plan": { "x_origin_m": 0, "y_origin_m": 0, "device_z_m": 1.2, "access_point_z_m": 2.5 },
+  "access_points": [ { "name": "Lobby", "x_m": 12.5, "y_m": 8.0, "bssid": "aa:bb:cc:dd:ee:01" } ],
+  "ble_beacons": [
+    {
+      "name": "Beacon-A",
+      "x_m": 5.0,
+      "y_m": 3.0,
+      "z_m": 1.0,
+      "mac_address": "aa:bb:cc:11:22:33",
+      "tx_power_dbm": -59,
+      "path_loss_n": 2.5
+    }
+  ],
+  "ble_min_rssi_dbm": -85
+}
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `ble_beacons[].name` | — | Label for this beacon |
+| `ble_beacons[].x_m`, `y_m` | — | Beacon position on your floor plan, in meters |
+| `ble_beacons[].z_m` | `1.0` | Beacon height above floor, in meters |
+| `ble_beacons[].mac_address` | — | Lowercase colon-separated MAC address of the BLE device |
+| `ble_beacons[].tx_power_dbm` | `-59` | Transmit power at 1 m (calibrate per device; iBeacon standard ≈ −59 dBm) |
+| `ble_beacons[].path_loss_n` | `2.5` | Path-loss exponent (2–4; same model as WiFi) |
+| `ble_min_rssi_dbm` | `-90` | Drop BLE readings weaker than this (top-level field, not inside `ble_beacons[]`) |
+
+**Component attributes** (BLE scanner tuning):
+
+| Attribute | Default | Role |
+|-----------|---------|------|
+| `ble_scan_interval_s` | `1.0` | Pause between BLE scan passes in the background thread |
+| `ble_measurement_noise_m2` | `6.0` | Assumed BLE fix variance (m²) fed to the EKF update step |
+
+**Notes:**
+
+- BLE fixes are always computed and contribute to position. When **motion fusion** is active (at least one motion source configured), the BLE fix is fed into the EKF as a second independent update after the WiFi fix. When no motion sources are configured, the BLE and WiFi fixes are combined via inverse-variance weighted blending instead — BLE still improves position, just without the Kalman filter's gating and coasting.
+- With **one beacon visible**, a range circle is projected toward the current filter position to approximate `(x, y)`. With **two or more**, standard 3D trilateration is used.
+- `tx_power_dbm` and `path_loss_n` are per-beacon: calibrate each device by placing it at a known distance and adjusting until the estimated range matches. The iBeacon default (`-59 dBm`, `n=2.5`) is a reasonable starting point indoors.
 
 ### Matching BSSIDs
 
