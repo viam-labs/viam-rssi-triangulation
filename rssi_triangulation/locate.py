@@ -225,6 +225,33 @@ def ap_position_in_reading_frame(
     raise ValueError(f"unknown ap_name {ap_name!r}; configured APs: {names}")
 
 
+def map_config_as_dict(config: LocatorConfig) -> dict:
+    """Static map data for external renderers (e.g. a 2D map camera).
+
+    All configured APs at absolute positions in the reading frame (floor
+    origin subtracted, same frame as ``location``), plus the floor extents
+    when configured. Unlike ``access_points``, this list is independent of
+    what was heard in the current scan.
+    """
+    aps = [
+        {
+            "name": ap.name,
+            "x": ap.x_m - config.x_origin_m,
+            "y": ap.y_m - config.y_origin_m,
+            "z": ap.z_m,
+            "unit": "meters",
+            "bssid": ap.bssid,
+        }
+        for ap in config.access_points
+    ]
+    out: dict = {"access_points": aps}
+    if config.width_m is not None:
+        out["width_m"] = config.width_m
+    if config.height_m is not None:
+        out["height_m"] = config.height_m
+    return out
+
+
 def effective_fingerprint_position(
     record: FingerprintRecord,
     config: LocatorConfig,
@@ -446,6 +473,7 @@ def build_readings_dict(
     payload["access_points"] = access_points_relative_to_position(
         position, matched, config
     )
+    payload["map"] = map_config_as_dict(config)
     if method is not None:
         payload["method"] = method
     fp_dict = fingerprint_match_as_dict(fp_match)

@@ -10,6 +10,7 @@ from rssi_triangulation.locate import (
     access_points_relative_to_position,
     apply_floor_origin,
     build_readings_dict,
+    map_config_as_dict,
     match_readings_to_aps,
     smooth_position,
 )
@@ -64,6 +65,41 @@ def test_build_readings_dict_includes_access_points(sample_config_dict: dict) ->
     assert "location" in payload
     assert len(payload["access_points"]) == 1
     assert payload["access_points"][0]["name"] == "AP-A"
+
+
+def test_map_config_lists_all_aps_in_reading_frame(sample_config_dict: dict) -> None:
+    config = parse_config_dict(sample_config_dict)
+    map_data = map_config_as_dict(config)
+    aps = map_data["access_points"]
+    assert [ap["name"] for ap in aps] == ["AP-A", "AP-B", "AP-C"]
+    # AP-A raw (0, 0) with origin (1, 2) → (-1, -2) in the reading frame
+    assert aps[0]["x"] == pytest.approx(-1.0)
+    assert aps[0]["y"] == pytest.approx(-2.0)
+    assert aps[0]["unit"] == "meters"
+    assert aps[0]["bssid"] == "aa:bb:cc:dd:ee:01"
+    assert "width_m" not in map_data
+    assert "height_m" not in map_data
+
+
+def test_map_config_includes_floor_extents(sample_config_dict: dict) -> None:
+    config_dict = {
+        **sample_config_dict,
+        "floor_plan": {
+            **sample_config_dict["floor_plan"],
+            "width_m": 40.0,
+            "height_m": 25.5,
+        },
+    }
+    map_data = map_config_as_dict(parse_config_dict(config_dict))
+    assert map_data["width_m"] == pytest.approx(40.0)
+    assert map_data["height_m"] == pytest.approx(25.5)
+
+
+def test_build_readings_dict_includes_map(sample_config_dict: dict) -> None:
+    config = parse_config_dict(sample_config_dict)
+    payload = build_readings_dict(PositionReading(0.0, 0.0), [("AP-A", -60.0, None)], config)
+    # every configured AP is present regardless of what was heard
+    assert len(payload["map"]["access_points"]) == 3
 
 
 def test_apply_floor_origin() -> None:

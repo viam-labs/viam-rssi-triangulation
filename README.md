@@ -75,6 +75,20 @@ Scans WiFi, estimates position, and returns coordinates in the configured floor-
       "rssi": -67.0
     }
   ],
+  "map": {
+    "access_points": [
+      {
+        "name": "WoStairsY",
+        "x": 22.91,
+        "y": 3.86,
+        "z": 2.44,
+        "unit": "meters",
+        "bssid": "be:9c:6c:2e:de:2c"
+      }
+    ],
+    "width_m": 40.0,
+    "height_m": 25.5
+  },
   "method": "hybrid",
   "nearest_fingerprint": "Matt Desk",
   "fingerprint_match": {
@@ -95,6 +109,8 @@ Scans WiFi, estimates position, and returns coordinates in the configured floor-
 When a fingerprint DB is configured, **`nearest_fingerprint`** is the best RSSI match (lowest `distance_db` RMS). **`fingerprint_rankings`** lists the top matches. RSSI-only fingerprints (`positioned: false`) participate in matching but do not pull `(x, y)` unless they have floor coordinates.
 
 `location.z` is the device/antenna height above the floor (from `device_z_m` in config, or updated at runtime via **`set_device_z_m`**). Positioning uses **3D slant range** when AP and device heights differ: standing under a ceiling AP no longer looks meters away in x/y just because the radio is 2.5 m above you. `access_points` lists configured APs heard on this scan, **strongest RSSI first**. Each `x` / `y` / `z` is the offset from your estimated position to that AP (AP position minus current position), in meters — not absolute floor coordinates.
+
+**`map`** is static map data for external renderers (e.g. a map camera such as `evan:viam-2d-mapper:location-map`): **every configured AP** — heard this scan or not — at its **absolute position in the reading frame** (raw config meters minus the `floor_plan` origin, i.e. the same frame as `location`), plus `width_m` / `height_m` when floor extents are configured. Consumers can draw the full AP layout and the live position from a single `get_readings` call, without duplicating the AP list in their own config.
 
 There is one positioning behavior: a **weighted centroid** (with 3D path-loss refinement), automatically **blended with fingerprint matches** in proportion to their confidence when a calibration DB exists. With no fingerprints it's pure geometry; the reported `method` field tells you what happened on each reading (`weighted_centroid`, `hybrid`, or `fingerprint`). See [Positioning options](#positioning-options) for tuning.
 
