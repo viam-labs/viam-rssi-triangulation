@@ -215,6 +215,7 @@ def execute_fingerprint_command(
             strict_mac=strict_mac,
             min_samples_per_ap=min_samples_per_ap,
             scan_count_override=scan_count_override,
+            device_z_m=device_z_m,
             fast_scan=fast_scan,
         )
 
@@ -485,6 +486,7 @@ def _match_fingerprints(
     strict_mac: bool,
     min_samples_per_ap: int | None,
     scan_count_override: int | None,
+    device_z_m: float | None,
     fast_scan: bool,
 ) -> dict[str, Any]:
     rank_k = int(command.get("k", 5))

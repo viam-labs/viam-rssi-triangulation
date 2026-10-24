@@ -555,3 +555,30 @@ def test_record_fingerprint_rssi_command(
     stored = db.list_all()[0]
     assert stored.positioned is False
     assert stored.distances_by_ap == {"AP-A": 8.3}
+    assert stored.distances_by_ap == {"AP-A": 8.3}
+
+
+def test_match_fingerprints_returns_nearest(
+    monkeypatch, tmp_path, sample_config_dict
+) -> None:
+    def fake_scan(*_args, **_kwargs):
+        return ([("AP-A", -60.0, None)], "mock", [], 1)
+
+    monkeypatch.setattr(
+        "rssi_triangulation.fingerprint_commands.collect_matched_scan",
+        fake_scan,
+    )
+    config = parse_config_dict(sample_config_dict)
+    db = FingerprintStore(tmp_path / "fp.sqlite")
+    execute_fingerprint_command(
+        {"command": "record_fingerprint", "ap_name": "AP-A"},
+        config=config,
+        db=db,
+    )
+    result = execute_fingerprint_command(
+        {"command": "match_fingerprints", "min_common_aps": 1},
+        config=config,
+        db=db,
+    )
+    assert result["command"] == "match_fingerprints"
+    assert result["bssids_heard"] == 1
