@@ -5,9 +5,9 @@ import math
 import pytest
 
 from rssi_triangulation.fingerprint import (
+    FingerprintMatch,
     FingerprintStore,
     matched_to_rssi_dict,
-    normalize_rssi_vector,
     rssi_vector_rms_db,
 )
 from rssi_triangulation.fingerprint_commands import (
@@ -21,7 +21,6 @@ from rssi_triangulation.locate import (
     fingerprint_confidence,
     range_prior_blend_factor,
 )
-from rssi_triangulation.fingerprint import FingerprintMatch
 from rssi_triangulation.module_config import parse_config_dict
 
 
@@ -397,7 +396,9 @@ def test_range_prior_blend_scales_with_match_confidence() -> None:
     assert range_prior_blend_factor(strong, max_rms_db=10.0) > range_prior_blend_factor(
         weak, max_rms_db=10.0
     )
-    assert range_prior_blend_factor(strong, max_rms_db=10.0) == pytest.approx(0.94, abs=0.02)
+    assert range_prior_blend_factor(strong, max_rms_db=10.0) == pytest.approx(
+        0.94, abs=0.02
+    )
 
     centroid = PositionReading(0.0, 0.0, z_m=0.5)
     strong_blend, strong_ann = blend_fingerprint_with_centroid(
@@ -494,8 +495,12 @@ def test_record_fingerprint_rssi_infers_xy_with_two_ranges(
     from rssi_triangulation.geo import slant_range_m
 
     true_x, true_y = 3.0, 4.0
-    slant_a = slant_range_m(true_x, true_y, device_z_m=0.2, ap_x=0.0, ap_y=0.0, ap_z=2.44)
-    slant_b = slant_range_m(true_x, true_y, device_z_m=0.2, ap_x=10.0, ap_y=0.0, ap_z=2.44)
+    slant_a = slant_range_m(
+        true_x, true_y, device_z_m=0.2, ap_x=0.0, ap_y=0.0, ap_z=2.44
+    )
+    slant_b = slant_range_m(
+        true_x, true_y, device_z_m=0.2, ap_x=10.0, ap_y=0.0, ap_z=2.44
+    )
     db = FingerprintStore(tmp_path / "fp.sqlite")
     result = execute_fingerprint_command(
         {
@@ -516,7 +521,9 @@ def test_record_fingerprint_rssi_infers_xy_with_two_ranges(
     assert result["z_m"] == pytest.approx(0.2)
 
 
-def test_record_fingerprint_rssi_command(monkeypatch, tmp_path, sample_config_dict) -> None:
+def test_record_fingerprint_rssi_command(
+    monkeypatch, tmp_path, sample_config_dict
+) -> None:
     def fake_scan(*_args, **_kwargs):
         return (
             [("AP-A", -60.0, None), ("AP-B", -70.0, None)],
@@ -548,3 +555,30 @@ def test_record_fingerprint_rssi_command(monkeypatch, tmp_path, sample_config_di
     stored = db.list_all()[0]
     assert stored.positioned is False
     assert stored.distances_by_ap == {"AP-A": 8.3}
+    assert stored.distances_by_ap == {"AP-A": 8.3}
+
+
+def test_match_fingerprints_returns_nearest(
+    monkeypatch, tmp_path, sample_config_dict
+) -> None:
+    def fake_scan(*_args, **_kwargs):
+        return ([("AP-A", -60.0, None)], "mock", [], 1)
+
+    monkeypatch.setattr(
+        "rssi_triangulation.fingerprint_commands.collect_matched_scan",
+        fake_scan,
+    )
+    config = parse_config_dict(sample_config_dict)
+    db = FingerprintStore(tmp_path / "fp.sqlite")
+    execute_fingerprint_command(
+        {"command": "record_fingerprint", "ap_name": "AP-A"},
+        config=config,
+        db=db,
+    )
+    result = execute_fingerprint_command(
+        {"command": "match_fingerprints", "min_common_aps": 1},
+        config=config,
+        db=db,
+    )
+    assert result["command"] == "match_fingerprints"
+    assert result["bssids_heard"] == 1

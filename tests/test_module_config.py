@@ -118,7 +118,9 @@ def test_parse_config_validation(payload: dict) -> None:
 def test_load_config_file(examples_dir: None = None) -> None:
     from pathlib import Path
 
-    path = Path(__file__).resolve().parents[1] / "examples" / "module_config_viam-5g.json"
+    path = (
+        Path(__file__).resolve().parents[1] / "examples" / "module_config_viam-5g.json"
+    )
     if not path.exists():
         pytest.skip("example config not present")
     cfg = load_config_file(path)

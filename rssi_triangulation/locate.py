@@ -6,8 +6,14 @@ import math
 from dataclasses import dataclass
 
 from .aggregate import AggregatedWifiReading, collect_averaged_readings
-from .aps import normalize_mac, resolve_ap_name
+from .aps import resolve_ap_name
 from .calibrate import MIN_SAMPLE_DISTANCE_M
+from .fingerprint import (
+    FingerprintMatch,
+    FingerprintRecord,
+    FingerprintStore,
+    matched_to_rssi_dict,
+)
 from .geo import (
     infer_xy_from_single_slant_with_prior,
     infer_xy_from_slant_distances,
@@ -15,17 +21,10 @@ from .geo import (
 )
 from .module_config import LocatorConfig, registry_from_config
 from .registry import ApRegistry
-from .fingerprint import (
-    FingerprintMatch,
-    FingerprintRecord,
-    FingerprintStore,
-    matched_to_rssi_dict,
-)
 from .triangulate import (
     PositionEstimate,
     anchors_from_readings,
     combined_anchor_weights,
-    effective_anchors,
     estimate_position,
     filter_anchors,
 )
@@ -90,12 +89,12 @@ def resolve_goto_target(store: FingerprintStore, label: str) -> FingerprintRecor
         raise ValueError(
             f"no fingerprint with label {label!r}; known labels: {', '.join(known)}"
         )
-    raise ValueError(
-        f"no fingerprint with label {label!r} (fingerprint DB is empty)"
-    )
+    raise ValueError(f"no fingerprint with label {label!r} (fingerprint DB is empty)")
 
 
-def _goto_hint(dx_m: float, dy_m: float, *, arrived: bool, arrival_radius_m: float) -> str:
+def _goto_hint(
+    dx_m: float, dy_m: float, *, arrived: bool, arrival_radius_m: float
+) -> str:
     if arrived:
         return f"within {arrival_radius_m:g} m of target"
     parts: list[str] = []
@@ -352,9 +351,7 @@ def geometric_centroid_xy(
 ) -> tuple[float, float] | None:
     """Reading-frame (x, y) from WiFi geometry only, without fingerprint blending."""
     registry = registry_from_config(config)
-    effective_device_z = (
-        config.device_z_m if device_z_m is None else device_z_m
-    )
+    effective_device_z = config.device_z_m if device_z_m is None else device_z_m
     estimate = estimate_position(
         registry,
         matched,
@@ -576,10 +573,14 @@ def collect_matched_scan(
     min_samples_per_ap: int | None = None,
     scan_count_override: int | None = None,
     fast_scan: bool = True,
-) -> tuple[list[tuple[str, float, float | None]], str, list[AggregatedWifiReading], int]:
+) -> tuple[
+    list[tuple[str, float, float | None]], str, list[AggregatedWifiReading], int
+]:
     """Run WiFi scans and return matched AP readings plus scan metadata."""
     registry = registry_from_config(config)
-    scan_count = scan_count_override if scan_count_override is not None else config.scan_count
+    scan_count = (
+        scan_count_override if scan_count_override is not None else config.scan_count
+    )
     aggregated, backend, scans_done = collect_averaged_readings(
         scan_count=scan_count,
         scan_delay_s=scan_delay_s,
@@ -680,7 +681,11 @@ def estimate_fingerprint_position(
         y = sum(w * py for (_, _, _, _, py, _, _), w in zip(resolved, weights)) / wsum
         z = sum(w * pz for (_, _, _, _, _, pz, _), w in zip(resolved, weights)) / wsum
         best_method = next(
-            (method for _, _, fp, _, _, _, method in resolved if fp.label == best_fp.label),
+            (
+                method
+                for _, _, fp, _, _, _, method in resolved
+                if fp.label == best_fp.label
+            ),
             resolved[0][6],
         )
         return FingerprintMatch(
@@ -961,9 +966,7 @@ def estimate_from_matched(
     """
     registry = registry_from_config(config)
 
-    effective_device_z = (
-        config.device_z_m if device_z_m is None else device_z_m
-    )
+    effective_device_z = config.device_z_m if device_z_m is None else device_z_m
     estimate = estimate_position(
         registry,
         matched,

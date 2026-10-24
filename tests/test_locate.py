@@ -134,7 +134,9 @@ def test_smooth_position_can_disable_step_limit() -> None:
     assert smoothed.y_m == 0.0
 
 
-def test_match_readings_to_aps_keeps_strongest_per_name(sample_registry: ApRegistry) -> None:
+def test_match_readings_to_aps_keeps_strongest_per_name(
+    sample_registry: ApRegistry,
+) -> None:
     readings = [
         AggregatedWifiReading(
             bssid="aa:bb:cc:dd:ee:01",

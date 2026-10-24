@@ -21,21 +21,20 @@ import argparse
 import json
 import sys
 import time
-from time import monotonic
 from dataclasses import asdict
 from pathlib import Path
+from time import monotonic
 
 from rssi_triangulation.calibrate import (
     calibrate_from_fingerprints,
     try_periodic_path_loss_calibration,
 )
-from rssi_triangulation.fingerprint import FingerprintStore
+from rssi_triangulation.fingerprint import FingerprintMatch, FingerprintStore
 from rssi_triangulation.fingerprint_commands import (
     default_fingerprint_db_path,
     execute_fingerprint_command,
 )
 from rssi_triangulation.fingerprint_session import get_fingerprint_session_manager
-from rssi_triangulation.fingerprint import FingerprintMatch
 from rssi_triangulation.locate import (
     GotoGuidance,
     PositionReading,
@@ -57,7 +56,9 @@ from rssi_triangulation.module_config import (
 )
 from rssi_triangulation.scanner import BackgroundScanner
 
-DEFAULT_CONFIG = Path(__file__).resolve().parent / "examples" / "module_config_viam-5g.json"
+DEFAULT_CONFIG = (
+    Path(__file__).resolve().parent / "examples" / "module_config_viam-5g.json"
+)
 _LAST_POSITION: PositionReading | None = None
 _DEVICE_Z_M: float | None = None
 _LAST_PATH_LOSS_CALIBRATION_MONOTONIC: float | None = None
@@ -144,11 +145,7 @@ def maybe_auto_calibrate_args(args: argparse.Namespace) -> None:
             f"Auto-applied path loss: tx_power_dbm={args.tx_power:.2f} "
             f"path_loss_n={args.path_loss_n:.3f} "
             f"(rmse {result['rmse_db']:.1f} dB over {result['sample_count']} samples"
-            + (
-                f", was {current['rmse_db']:.1f} dB"
-                if "rmse_db" in current
-                else ""
-            )
+            + (f", was {current['rmse_db']:.1f} dB" if "rmse_db" in current else "")
             + ")",
             file=sys.stderr,
         )
@@ -182,12 +179,12 @@ def format_report(
         f"Method: {method_used}",
     ]
     if elapsed_s is not None:
-        lines.append(f"Cycle time: {elapsed_s:.2f}s (scans dominate; --interval sleeps after this)")
+        lines.append(
+            f"Cycle time: {elapsed_s:.2f}s (scans dominate; --interval sleeps after this)"
+        )
     if fp_match is not None:
         blend_note = (
-            f", blend {fp_match.blend_weight:.0%}"
-            if fp_match.blend_weight > 0
-            else ""
+            f", blend {fp_match.blend_weight:.0%}" if fp_match.blend_weight > 0 else ""
         )
         lines.append(
             f"Fingerprint: {fp_match.label} (rms {fp_match.distance_db:.1f} dB, "
@@ -242,9 +239,7 @@ def parse_at_coordinates(value: str) -> tuple[float, float, float | None]:
     """Parse --at "X,Y" or "X,Y,Z" (meters, floor-plan frame)."""
     parts = [p.strip() for p in value.split(",")]
     if len(parts) not in (2, 3):
-        raise ValueError(
-            f'--at must be "X,Y" or "X,Y,Z" in meters, got {value!r}'
-        )
+        raise ValueError(f'--at must be "X,Y" or "X,Y,Z" in meters, got {value!r}')
     try:
         x_m = float(parts[0])
         y_m = float(parts[1])
@@ -314,9 +309,11 @@ def run_fingerprint_session_recording(
     min_samples = args.min_samples
     after_deadline_no_progress = 0
     last_sample_count = 0
-    while monotonic() < deadline or get_fingerprint_session_manager().status().get(
-        "sample_count", 0
-    ) < min_samples:
+    while (
+        monotonic() < deadline
+        or get_fingerprint_session_manager().status().get("sample_count", 0)
+        < min_samples
+    ):
         execute_fingerprint_command(
             {"command": "sample_fingerprint_recording"},
             config=config,
@@ -614,30 +611,32 @@ def run_once(args: argparse.Namespace) -> int:
             locate_via_scanner(args, config, fp_store)
         )
     else:
-        raw_position, backend, readings, scans_done, method_used, fp_match = locate_position(
-            config,
-            device_z_m=effective_device_z_m(config),
-            interface=args.interface,
-            backend=args.backend,
-            scan_delay_s=effective_scan_delay(args),
-            blocking=effective_blocking(args),
-            strict_mac=args.strict_mac,
-            min_anchors=args.min_aps,
-            max_rssi_delta_db=None if args.no_rssi_filter else args.max_rssi_delta,
-            min_rssi_dbm=args.min_rssi,
-            min_samples_per_ap=args.min_samples_per_ap,
-            tx_power_dbm=args.tx_power,
-            path_loss_n=args.path_loss_n,
-            weight_temperature=args.weight_temperature,
-            fingerprint_store=fp_store,
-            fingerprint_k=args.fingerprint_k,
-            fingerprint_min_common_aps=args.fingerprint_min_common_aps,
-            fingerprint_min_common_fraction=args.fingerprint_min_common_fraction,
-            fingerprint_max_rms_db=(
-                None if args.no_fingerprint_max_rms else args.fingerprint_max_rms
-            ),
-            fingerprint_max_blend=args.fingerprint_max_blend,
-            fast_scan=effective_fast_scan(args),
+        raw_position, backend, readings, scans_done, method_used, fp_match = (
+            locate_position(
+                config,
+                device_z_m=effective_device_z_m(config),
+                interface=args.interface,
+                backend=args.backend,
+                scan_delay_s=effective_scan_delay(args),
+                blocking=effective_blocking(args),
+                strict_mac=args.strict_mac,
+                min_anchors=args.min_aps,
+                max_rssi_delta_db=None if args.no_rssi_filter else args.max_rssi_delta,
+                min_rssi_dbm=args.min_rssi,
+                min_samples_per_ap=args.min_samples_per_ap,
+                tx_power_dbm=args.tx_power,
+                path_loss_n=args.path_loss_n,
+                weight_temperature=args.weight_temperature,
+                fingerprint_store=fp_store,
+                fingerprint_k=args.fingerprint_k,
+                fingerprint_min_common_aps=args.fingerprint_min_common_aps,
+                fingerprint_min_common_fraction=args.fingerprint_min_common_fraction,
+                fingerprint_max_rms_db=(
+                    None if args.no_fingerprint_max_rms else args.fingerprint_max_rms
+                ),
+                fingerprint_max_blend=args.fingerprint_max_blend,
+                fast_scan=effective_fast_scan(args),
+            )
         )
     elapsed_s = monotonic() - t0
     position = smooth_position(
@@ -1092,9 +1091,11 @@ def main() -> int:
             "--distance-to-ap applies to --record-fingerprint-rssi, "
             "--record-fingerprint-session, or --start-fingerprint-recording"
         )
-    if args.at and not (args.record_fingerprint_here or args.record_fingerprint_session):
+    if args.at and not (
+        args.record_fingerprint_here or args.record_fingerprint_session
+    ):
         parser.error(
-            '--at applies to --record-fingerprint-here or --record-fingerprint-session'
+            "--at applies to --record-fingerprint-here or --record-fingerprint-session"
         )
     if args.record_fingerprint_session and args.session_duration <= 0:
         parser.error("--session-duration must be > 0")

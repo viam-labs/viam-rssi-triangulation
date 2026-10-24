@@ -17,7 +17,6 @@ from rssi_triangulation.module_config import parse_config_dict
 from rssi_triangulation.registry import AccessPoint, ApRegistry
 from rssi_triangulation.triangulate import clamp_to_bounds, estimate_position
 
-
 FIELD_APS = (
     ("SoA1", 5.22, 4.42, "aa:00:00:00:00:01"),
     ("NoE4", 18.03, 7.26, "aa:00:00:00:00:02"),
@@ -50,8 +49,7 @@ def _field_config_dict() -> dict:
         "scan_count": 1,
         "floor_plan": {"device_z_m": 0.2, "access_point_z_m": 2.44},
         "access_points": [
-            {"name": n, "x_m": x, "y_m": y, "bssid": b}
-            for n, x, y, b in FIELD_APS
+            {"name": n, "x_m": x, "y_m": y, "bssid": b} for n, x, y, b in FIELD_APS
         ],
     }
 

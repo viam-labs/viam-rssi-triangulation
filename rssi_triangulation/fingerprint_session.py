@@ -186,7 +186,9 @@ class FingerprintSessionManager:
         z_m: float | None = None,
         positioned: bool | None = None,
         distances_by_ap: Mapping[str, float] | None = None,
-    ) -> tuple[FingerprintRecordingSession, dict[str, float], dict[str, dict[str, float]]]:
+    ) -> tuple[
+        FingerprintRecordingSession, dict[str, float], dict[str, dict[str, float]]
+    ]:
         with self._lock:
             session = self._session
             if session is None:

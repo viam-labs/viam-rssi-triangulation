@@ -1,7 +1,11 @@
 """RSSI WiFi triangulation from configured access point positions and BSSIDs."""
 
+from .aggregate import (
+    AggregatedWifiReading,
+    aggregate_wifi_readings,
+    collect_averaged_readings,
+)
 from .aps import normalize_mac, resolve_ap_name, unifi_bssid_variants
-from .aggregate import AggregatedWifiReading, aggregate_wifi_readings, collect_averaged_readings
 from .fusion import (
     MotionDelta,
     PositionFilter,
@@ -10,9 +14,14 @@ from .fusion import (
 )
 from .linux_scan import WifiReading, scan_wifi
 from .locate import PositionReading, estimate_from_matched, locate_position
-from .scanner import BackgroundScanner, RssiSampleBuffer, TimedSample, decayed_aggregate
-from .module_config import LocatorConfig, load_config_file, parse_config_dict, registry_from_config
+from .module_config import (
+    LocatorConfig,
+    load_config_file,
+    parse_config_dict,
+    registry_from_config,
+)
 from .registry import AccessPoint, ApRegistry
+from .scanner import BackgroundScanner, RssiSampleBuffer, TimedSample, decayed_aggregate
 from .triangulate import PositionEstimate, estimate_position
 
 __all__ = [

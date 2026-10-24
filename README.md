@@ -104,7 +104,9 @@ There is one positioning behavior: a **weighted centroid** (with 3D path-loss re
 from viam.components.sensor import Sensor
 from viam.services.machine import Machine
 
-async with Machine.create_from_address("<machine-address>", "<api-key>", "<api-key-id>") as machine:
+async with Machine.create_from_address(
+    "<machine-address>", "<api-key>", "<api-key-id>"
+) as machine:
     sensor = Sensor.from_name("wifi-position")
     readings = await sensor.get_readings()
     loc = readings["location"]
@@ -363,9 +365,13 @@ Errors (unknown `ap_name`, missing fields, empty scan) raise an exception from `
 from viam.components.sensor import Sensor
 from viam.services.machine import Machine
 
-async with Machine.create_from_address("<machine-address>", "<api-key>", "<api-key-id>") as machine:
+async with Machine.create_from_address(
+    "<machine-address>", "<api-key>", "<api-key-id>"
+) as machine:
     sensor = Sensor.from_name("wifi-position")
-    result = await sensor.do_command({"command": "record_fingerprint", "ap_name": "Cafe, WoH1"})
+    result = await sensor.do_command(
+        {"command": "record_fingerprint", "ap_name": "Cafe, WoH1"}
+    )
     print(result)
 ```
 
