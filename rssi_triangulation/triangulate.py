@@ -163,7 +163,9 @@ def has_vertical_geometry(
     return any(abs(device_z_m - a.z_m) > threshold_m for a in anchors)
 
 
-def _weights_from_rssi(anchors: list[Anchor], weight_temperature: float = 2.0) -> list[float]:
+def _weights_from_rssi(
+    anchors: list[Anchor], weight_temperature: float = 2.0
+) -> list[float]:
     """
     Stronger RSSI (less negative) gets higher weight.
 
@@ -483,8 +485,7 @@ def _weighted_rmse(
     if wsum <= 0:
         return 0.0
     err_sq = sum(
-        w * (distance_3d_m(x, y, device_z_m, a) ** 2)
-        for a, w in zip(anchors, weights)
+        w * (distance_3d_m(x, y, device_z_m, a) ** 2) for a, w in zip(anchors, weights)
     )
     return math.sqrt(err_sq / wsum)
 

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from rssi_triangulation.module_config import LocatorConfig, parse_config_dict, registry_from_config
+from rssi_triangulation.module_config import (
+    LocatorConfig,
+    parse_config_dict,
+    registry_from_config,
+)
 from rssi_triangulation.registry import AccessPoint, ApRegistry
 
 

@@ -123,8 +123,8 @@ def fit_path_loss(samples: list[PathLossSample]) -> PathLossFit:
     if spread < MIN_LOG_DISTANCE_SPREAD:
         raise ValueError(
             "fingerprint-to-AP distances are too similar to fit path loss "
-            f"(distance ratio {10 ** spread:.2f}x, need >= "
-            f"{10 ** MIN_LOG_DISTANCE_SPREAD:.1f}x). Record fingerprints both "
+            f"(distance ratio {10**spread:.2f}x, need >= "
+            f"{10**MIN_LOG_DISTANCE_SPREAD:.1f}x). Record fingerprints both "
             "near and far from APs."
         )
     n = len(samples)
@@ -298,12 +298,17 @@ def try_periodic_path_loss_calibration(
             current_path_loss_n=current_path_loss_n,
         )
     except ValueError as exc:
-        return current_tx_power_dbm, current_path_loss_n, now, {
-            "ok": False,
-            "skipped": True,
-            "reason": str(exc),
-            "auto": True,
-        }
+        return (
+            current_tx_power_dbm,
+            current_path_loss_n,
+            now,
+            {
+                "ok": False,
+                "skipped": True,
+                "reason": str(exc),
+                "auto": True,
+            },
+        )
 
     applied = should_auto_apply_path_loss_calibration(result)
     if applied:

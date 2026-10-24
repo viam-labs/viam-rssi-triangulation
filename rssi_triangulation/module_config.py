@@ -35,7 +35,9 @@ class LocatorConfig:
     height_m: float | None = None
 
 
-def _float_field(fields: Mapping[str, Any], key: str, *, default: float | None = None) -> float:
+def _float_field(
+    fields: Mapping[str, Any], key: str, *, default: float | None = None
+) -> float:
     if key not in fields:
         if default is not None:
             return default

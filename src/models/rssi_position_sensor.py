@@ -150,7 +150,9 @@ class RssiPositionSensor(Sensor, EasyResource):
         sensor._interface = (
             fields["interface"].string_value if "interface" in fields else None
         )
-        sensor._backend = fields["backend"].string_value if "backend" in fields else None
+        sensor._backend = (
+            fields["backend"].string_value if "backend" in fields else None
+        )
         sensor._scan_delay_s = (
             fields["scan_delay_s"].number_value if "scan_delay_s" in fields else 0.15
         )
@@ -175,9 +177,7 @@ class RssiPositionSensor(Sensor, EasyResource):
             else 20.0
         )
         sensor._min_rssi_dbm = (
-            fields["min_rssi_dbm"].number_value
-            if "min_rssi_dbm" in fields
-            else -82.0
+            fields["min_rssi_dbm"].number_value if "min_rssi_dbm" in fields else -82.0
         )
         sensor._min_samples_per_ap = (
             int(fields["min_samples_per_ap"].number_value)
@@ -213,7 +213,9 @@ class RssiPositionSensor(Sensor, EasyResource):
         )
         sensor._fingerprint_db_path = Path(db_path)
         sensor._fingerprint_k = (
-            int(fields["fingerprint_k"].number_value) if "fingerprint_k" in fields else 1
+            int(fields["fingerprint_k"].number_value)
+            if "fingerprint_k" in fields
+            else 1
         )
         sensor._fingerprint_min_common_aps = (
             int(fields["fingerprint_min_common_aps"].number_value)
@@ -264,9 +266,7 @@ class RssiPositionSensor(Sensor, EasyResource):
             "SLAMClient | None",
             cls._lookup_dependency(dependencies, SLAMClient, source_names.get("slam")),
         )
-        has_source = any(
-            (sensor._movement_sensor, sensor._base, sensor._slam)
-        )
+        has_source = any((sensor._movement_sensor, sensor._base, sensor._slam))
         sensor._fusion_enabled = (
             fields["motion_fusion"].bool_value
             if "motion_fusion" in fields
@@ -559,7 +559,14 @@ class RssiPositionSensor(Sensor, EasyResource):
                 fp_match,
             ) = await asyncio.to_thread(self._locate_from_buffer)
         else:
-            raw_xy, backend, readings, scans, method_used, fp_match = await asyncio.to_thread(
+            (
+                raw_xy,
+                backend,
+                readings,
+                scans,
+                method_used,
+                fp_match,
+            ) = await asyncio.to_thread(
                 locate_position,
                 self._config,
                 device_z_m=self._device_z_m,
@@ -643,7 +650,9 @@ class RssiPositionSensor(Sensor, EasyResource):
                 raw_position,
                 alpha=self._smoothing_alpha,
                 max_step_m=(
-                    None if self._max_position_step_m <= 0 else self._max_position_step_m
+                    None
+                    if self._max_position_step_m <= 0
+                    else self._max_position_step_m
                 ),
             )
         self._last_position = position

@@ -43,10 +43,14 @@ def parse_distances_m(
     raw_list = command.get("distance_to_ap")
     if raw_list is not None:
         if not isinstance(raw_list, list):
-            raise ValueError('distance_to_ap must be a list of {"ap_name", "distance_m"} objects')
+            raise ValueError(
+                'distance_to_ap must be a list of {"ap_name", "distance_m"} objects'
+            )
         for item in raw_list:
             if not isinstance(item, Mapping):
-                raise ValueError('distance_to_ap entries must be objects with ap_name and distance_m')
+                raise ValueError(
+                    "distance_to_ap entries must be objects with ap_name and distance_m"
+                )
             ap_name = item.get("ap_name")
             if not isinstance(ap_name, str) or not ap_name:
                 raise ValueError('distance_to_ap entries require "ap_name"')
@@ -182,7 +186,12 @@ def execute_fingerprint_command(
 
     if name == "clear_fingerprints":
         removed = db.clear()
-        return {"ok": True, "command": name, "removed": removed, "db_path": str(db.path)}
+        return {
+            "ok": True,
+            "command": name,
+            "removed": removed,
+            "db_path": str(db.path),
+        }
 
     if name == "calibrate_path_loss":
         result = calibrate_from_fingerprints(
@@ -312,7 +321,9 @@ def _sample_fingerprint_recording(
     manager = get_fingerprint_session_manager()
     if not manager.active():
         raise RuntimeError("no active fingerprint recording session")
-    effective_scans = scan_count_override if scan_count_override is not None else config.scan_count
+    effective_scans = (
+        scan_count_override if scan_count_override is not None else config.scan_count
+    )
     matched, backend_name, _aggregated, scans_done = collect_matched_scan(
         config,
         interface=interface,
@@ -550,9 +561,7 @@ def _record_fingerprint(
     device_z_m: float | None,
     fast_scan: bool,
 ) -> dict[str, Any]:
-    effective_device_z = (
-        config.device_z_m if device_z_m is None else device_z_m
-    )
+    effective_device_z = config.device_z_m if device_z_m is None else device_z_m
     if cmd == "record_fingerprint":
         ap_name = command.get("ap_name") or command.get("label")
         if not isinstance(ap_name, str) or not ap_name:
@@ -568,11 +577,7 @@ def _record_fingerprint(
             raise ValueError('record_fingerprint_here requires "x_m" and "y_m"')
         x_m = float(command["x_m"])
         y_m = float(command["y_m"])
-        z_m = (
-            float(command["z_m"])
-            if "z_m" in command
-            else effective_device_z
-        )
+        z_m = float(command["z_m"]) if "z_m" in command else effective_device_z
 
     scan_count = scan_count_override
     if scan_count is None and "scan_count" in command:

@@ -50,8 +50,7 @@ def _field_config_dict() -> dict:
         "scan_count": 1,
         "floor_plan": {"device_z_m": 0.2, "access_point_z_m": 2.44},
         "access_points": [
-            {"name": n, "x_m": x, "y_m": y, "bssid": b}
-            for n, x, y, b in FIELD_APS
+            {"name": n, "x_m": x, "y_m": y, "bssid": b} for n, x, y, b in FIELD_APS
         ],
     }
 
