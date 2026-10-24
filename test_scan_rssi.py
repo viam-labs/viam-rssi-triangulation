@@ -21,21 +21,20 @@ import argparse
 import json
 import sys
 import time
-from time import monotonic
 from dataclasses import asdict
 from pathlib import Path
+from time import monotonic
 
 from rssi_triangulation.calibrate import (
     calibrate_from_fingerprints,
     try_periodic_path_loss_calibration,
 )
-from rssi_triangulation.fingerprint import FingerprintStore
+from rssi_triangulation.fingerprint import FingerprintMatch, FingerprintStore
 from rssi_triangulation.fingerprint_commands import (
     default_fingerprint_db_path,
     execute_fingerprint_command,
 )
 from rssi_triangulation.fingerprint_session import get_fingerprint_session_manager
-from rssi_triangulation.fingerprint import FingerprintMatch
 from rssi_triangulation.locate import (
     GotoGuidance,
     PositionReading,

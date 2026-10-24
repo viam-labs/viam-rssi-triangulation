@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-
 from rssi_triangulation.linux_scan import WifiReading
 from rssi_triangulation.scanner import (
     BackgroundScanner,

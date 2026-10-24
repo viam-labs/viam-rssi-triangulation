@@ -6,9 +6,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .calibrate import MIN_SAMPLE_DISTANCE_M, calibrate_from_fingerprints
-from .geo import infer_xy_from_slant_distances
 from .fingerprint import FingerprintStore, matched_to_rssi_dict
 from .fingerprint_session import get_fingerprint_session_manager
+from .geo import infer_xy_from_slant_distances
 from .locate import (
     ap_position_in_reading_frame,
     collect_matched_scan,

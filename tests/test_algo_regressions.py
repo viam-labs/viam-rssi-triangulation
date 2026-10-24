@@ -17,7 +17,6 @@ from rssi_triangulation.module_config import parse_config_dict
 from rssi_triangulation.registry import AccessPoint, ApRegistry
 from rssi_triangulation.triangulate import clamp_to_bounds, estimate_position
 
-
 FIELD_APS = (
     ("SoA1", 5.22, 4.42, "aa:00:00:00:00:01"),
     ("NoE4", 18.03, 7.26, "aa:00:00:00:00:02"),

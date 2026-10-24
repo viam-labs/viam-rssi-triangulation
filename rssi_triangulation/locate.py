@@ -6,8 +6,14 @@ import math
 from dataclasses import dataclass
 
 from .aggregate import AggregatedWifiReading, collect_averaged_readings
-from .aps import normalize_mac, resolve_ap_name
+from .aps import resolve_ap_name
 from .calibrate import MIN_SAMPLE_DISTANCE_M
+from .fingerprint import (
+    FingerprintMatch,
+    FingerprintRecord,
+    FingerprintStore,
+    matched_to_rssi_dict,
+)
 from .geo import (
     infer_xy_from_single_slant_with_prior,
     infer_xy_from_slant_distances,
@@ -15,17 +21,10 @@ from .geo import (
 )
 from .module_config import LocatorConfig, registry_from_config
 from .registry import ApRegistry
-from .fingerprint import (
-    FingerprintMatch,
-    FingerprintRecord,
-    FingerprintStore,
-    matched_to_rssi_dict,
-)
 from .triangulate import (
     PositionEstimate,
     anchors_from_readings,
     combined_anchor_weights,
-    effective_anchors,
     estimate_position,
     filter_anchors,
 )

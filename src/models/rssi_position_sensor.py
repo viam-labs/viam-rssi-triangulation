@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import math
-from time import monotonic
 from pathlib import Path
+from time import monotonic
 from typing import Any, ClassVar, Mapping, Sequence, Tuple, cast
 
 from typing_extensions import Self
-
 from viam.components.base import Base
 from viam.components.movement_sensor import MovementSensor
 from viam.components.sensor import Sensor
@@ -41,12 +40,12 @@ from rssi_triangulation.locate import (
     match_readings_to_aps,
     smooth_position,
 )
-from rssi_triangulation.scanner import BackgroundScanner
 from rssi_triangulation.module_config import (
     LocatorConfig,
     parse_component_config,
     registry_from_config,
 )
+from rssi_triangulation.scanner import BackgroundScanner
 
 MODEL: ClassVar[Model] = Model(
     ModelFamily("viam-labs", "rssi-triangulation"),

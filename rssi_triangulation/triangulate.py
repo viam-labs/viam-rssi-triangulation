@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from .registry import AccessPoint, ApRegistry
+from .registry import ApRegistry
 
 
 @dataclass(frozen=True)

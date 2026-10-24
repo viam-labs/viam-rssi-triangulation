@@ -5,9 +5,9 @@ import math
 import pytest
 
 from rssi_triangulation.fingerprint import (
+    FingerprintMatch,
     FingerprintStore,
     matched_to_rssi_dict,
-    normalize_rssi_vector,
     rssi_vector_rms_db,
 )
 from rssi_triangulation.fingerprint_commands import (
@@ -21,7 +21,6 @@ from rssi_triangulation.locate import (
     fingerprint_confidence,
     range_prior_blend_factor,
 )
-from rssi_triangulation.fingerprint import FingerprintMatch
 from rssi_triangulation.module_config import parse_config_dict
 
 
