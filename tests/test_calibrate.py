@@ -154,7 +154,11 @@ def test_calibrate_command_end_to_end(tmp_path) -> None:
     )
     ap_xy = {"A": (0.0, 0.0), "B": (20.0, 0.0), "C": (0.0, 20.0)}
     db = FingerprintStore(tmp_path / "fp.sqlite")
-    for label, (fx, fy) in {"p1": (2.0, 2.0), "p2": (10.0, 5.0), "p3": (18.0, 16.0)}.items():
+    for label, (fx, fy) in {
+        "p1": (2.0, 2.0),
+        "p2": (10.0, 5.0),
+        "p3": (18.0, 16.0),
+    }.items():
         rssi = {
             name: _model_rssi(math.hypot(fx - x, fy - y), tx=tx, n=n)
             for name, (x, y) in ap_xy.items()
@@ -185,22 +189,25 @@ def test_calibrate_from_fingerprints_empty_db(tmp_path, locator_config) -> None:
 
 def test_path_loss_rmse_db_zero_for_exact_model() -> None:
     samples = _synthetic_samples(tx=-40.0, n=2.5, distances=[1.0, 5.0, 12.0, 30.0])
-    assert path_loss_rmse_db(samples, tx_power_dbm=-40.0, path_loss_n=2.5) == pytest.approx(
-        0.0, abs=1e-9
-    )
+    assert path_loss_rmse_db(
+        samples, tx_power_dbm=-40.0, path_loss_n=2.5
+    ) == pytest.approx(0.0, abs=1e-9)
 
 
 def test_should_auto_apply_rejects_implausible_fit() -> None:
     assert should_auto_apply_path_loss_calibration({"ok": True}) is True
     assert should_auto_apply_path_loss_calibration({"ok": False}) is False
-    assert should_auto_apply_path_loss_calibration(
-        {
-            "ok": True,
-            "warnings": [
-                "fitted path_loss_n=0.50 is outside the plausible indoor range [1.5, 6.0]"
-            ],
-        }
-    ) is False
+    assert (
+        should_auto_apply_path_loss_calibration(
+            {
+                "ok": True,
+                "warnings": [
+                    "fitted path_loss_n=0.50 is outside the plausible indoor range [1.5, 6.0]"
+                ],
+            }
+        )
+        is False
+    )
 
 
 def test_try_periodic_path_loss_calibration_runs_once_then_waits(tmp_path) -> None:
@@ -218,7 +225,11 @@ def test_try_periodic_path_loss_calibration_runs_once_then_waits(tmp_path) -> No
     )
     ap_xy = {"A": (0.0, 0.0), "B": (20.0, 0.0), "C": (0.0, 20.0)}
     db = FingerprintStore(tmp_path / "fp.sqlite")
-    for label, (fx, fy) in {"p1": (2.0, 2.0), "p2": (10.0, 5.0), "p3": (18.0, 16.0)}.items():
+    for label, (fx, fy) in {
+        "p1": (2.0, 2.0),
+        "p2": (10.0, 5.0),
+        "p3": (18.0, 16.0),
+    }.items():
         rssi = {
             name: _model_rssi(math.hypot(fx - x, fy - y), tx=tx, n=n)
             for name, (x, y) in ap_xy.items()

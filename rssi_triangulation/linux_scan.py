@@ -54,7 +54,9 @@ def detect_wireless_interface(preferred: str | None = None) -> str:
     return "wlan0"
 
 
-def _filter_by_ssid(readings: list[WifiReading], network: str | None) -> list[WifiReading]:
+def _filter_by_ssid(
+    readings: list[WifiReading], network: str | None
+) -> list[WifiReading]:
     if not network:
         return readings
     want = network.strip()
@@ -117,7 +119,9 @@ def scan_iw_blocking(interface: str) -> list[WifiReading]:
         raise RuntimeError("iw not found on PATH")
     proc = _run(["iw", "dev", interface, "scan"], timeout=45.0)
     if proc.returncode != 0:
-        raise RuntimeError(f"iw scan failed (exit {proc.returncode}): {_cmd_output(proc)}")
+        raise RuntimeError(
+            f"iw scan failed (exit {proc.returncode}): {_cmd_output(proc)}"
+        )
     return parse_iw_scan(proc.stdout)
 
 
@@ -189,7 +193,11 @@ def parse_wpa_cli_scan_results(output: str) -> list[WifiReading]:
     readings: list[WifiReading] = []
     for line in output.splitlines():
         line = line.strip()
-        if not line or line.startswith("bssid") or line.startswith("Selected interface"):
+        if (
+            not line
+            or line.startswith("bssid")
+            or line.startswith("Selected interface")
+        ):
             continue
         parts = line.split("\t")
         if len(parts) < 3:
@@ -277,7 +285,16 @@ def scan_nmcli(interface: str) -> list[WifiReading]:
     if not shutil.which("nmcli"):
         raise RuntimeError("nmcli not found on PATH")
     proc = _run(
-        ["nmcli", "-g", "BSSID,SSID,SIGNAL", "dev", "wifi", "list", "ifname", interface],
+        [
+            "nmcli",
+            "-g",
+            "BSSID,SSID,SIGNAL",
+            "dev",
+            "wifi",
+            "list",
+            "ifname",
+            interface,
+        ],
         timeout=30.0,
     )
     if proc.returncode != 0:
@@ -296,6 +313,7 @@ def scan_nmcli_rescan_then_iw_dump(interface: str) -> list[WifiReading]:
 ScanFn = Callable[[str], list[WifiReading]]
 
 _CACHED_INTERFACE: str | None = None
+
 
 def _scan_backend_pool(
     *,
@@ -334,7 +352,9 @@ def _scan_backend_pool(
     ]
 
 
-def _backend_chain(pool: list[tuple[str, ScanFn]], backend: str | None) -> list[tuple[str, ScanFn]]:
+def _backend_chain(
+    pool: list[tuple[str, ScanFn]], backend: str | None
+) -> list[tuple[str, ScanFn]]:
     by_name = dict(pool)
     if not backend:
         return pool
@@ -407,4 +427,6 @@ def scan_wifi(
         "\nTip: interface busy while connected is common — omit --backend iw so wpa_cli "
         "can be used, or run: --backend wpa_cli"
     )
-    raise RuntimeError("no WiFi scan backend succeeded:\n  " + "\n  ".join(errors) + hint)
+    raise RuntimeError(
+        "no WiFi scan backend succeeded:\n  " + "\n  ".join(errors) + hint
+    )

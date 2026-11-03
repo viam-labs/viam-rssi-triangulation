@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
+from rssi_triangulation.fingerprint_commands import execute_fingerprint_command
 from rssi_triangulation.fingerprint_session import (
     aggregate_rssi_samples,
     get_fingerprint_session_manager,
 )
-from rssi_triangulation.fingerprint_commands import execute_fingerprint_command
 from rssi_triangulation.module_config import parse_config_dict
 
 

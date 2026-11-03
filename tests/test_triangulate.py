@@ -212,7 +212,9 @@ def test_under_ceiling_ap_stays_at_ap_xy() -> None:
     assert est.y_m == pytest.approx(20.0, abs=0.5)
 
 
-def test_without_vertical_geometry_skips_3d_refine(triangle_registry: ApRegistry) -> None:
+def test_without_vertical_geometry_skips_3d_refine(
+    triangle_registry: ApRegistry,
+) -> None:
     readings = [("left", -60.0, None), ("right", -60.0, None)]
     est = estimate_position(
         triangle_registry,

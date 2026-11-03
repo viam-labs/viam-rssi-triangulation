@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-
 from rssi_triangulation.linux_scan import WifiReading
 from rssi_triangulation.scanner import (
     BackgroundScanner,
@@ -21,7 +19,9 @@ def _reading(bssid: str = "aa:bb:cc:dd:ee:01", rssi: float = -60.0) -> WifiReadi
     )
 
 
-def _sample(rssi: float, t: float, seq: int = 1, bssid: str = "aa:bb:cc:dd:ee:01") -> TimedSample:
+def _sample(
+    rssi: float, t: float, seq: int = 1, bssid: str = "aa:bb:cc:dd:ee:01"
+) -> TimedSample:
     return TimedSample(reading=_reading(bssid, rssi), monotonic_s=t, scan_seq=seq)
 
 

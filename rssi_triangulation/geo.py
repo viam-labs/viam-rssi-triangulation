@@ -55,9 +55,7 @@ def infer_xy_from_slant_distances(
     """
     circles: list[tuple[float, float, float]] = []
     for ap_name, (ax, ay, az, slant) in ap_ranges.items():
-        ri_sq = horizontal_radius_sq_from_slant(
-            slant, device_z_m=device_z_m, ap_z_m=az
-        )
+        ri_sq = horizontal_radius_sq_from_slant(slant, device_z_m=device_z_m, ap_z_m=az)
         if ri_sq < min_horizontal_m * min_horizontal_m:
             raise ValueError(
                 f"horizontal reach to {ap_name!r} is below {min_horizontal_m} m "
@@ -94,9 +92,7 @@ def infer_xy_from_single_slant_with_prior(
     ``prior_x/y`` (usually the instantaneous WiFi geometry estimate).
     """
     ri = math.sqrt(
-        horizontal_radius_sq_from_slant(
-            slant_m, device_z_m=device_z_m, ap_z_m=ap_z
-        )
+        horizontal_radius_sq_from_slant(slant_m, device_z_m=device_z_m, ap_z_m=ap_z)
     )
     if ri < min_horizontal_m:
         raise ValueError(
@@ -195,7 +191,9 @@ def _pick_circle_solution(
     cy = (config.height_m or 0.0) * 0.5
     if config.width_m is None and config.height_m is None:
         return a
-    return a if math.hypot(a[0] - cx, a[1] - cy) <= math.hypot(b[0] - cx, b[1] - cy) else b
+    return (
+        a if math.hypot(a[0] - cx, a[1] - cy) <= math.hypot(b[0] - cx, b[1] - cy) else b
+    )
 
 
 def _least_squares_trilateration(
@@ -207,14 +205,7 @@ def _least_squares_trilateration(
     for xi, yi, ri_sq in circles[1:]:
         a = 2.0 * (xi - x0)
         b = 2.0 * (yi - y0)
-        rhs = (
-            r0_sq
-            - ri_sq
-            + xi * xi
-            - x0 * x0
-            + yi * yi
-            - y0 * y0
-        )
+        rhs = r0_sq - ri_sq + xi * xi - x0 * x0 + yi * yi - y0 * y0
         ata_00 += a * a
         ata_01 += a * b
         ata_11 += b * b

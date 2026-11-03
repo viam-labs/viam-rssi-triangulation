@@ -162,16 +162,14 @@ class FingerprintStore:
                     """
                 )
                 cols = {
-                    row[1]
-                    for row in conn.execute("PRAGMA table_info(fingerprints)")
+                    row[1] for row in conn.execute("PRAGMA table_info(fingerprints)")
                 }
                 if "z_m" not in cols:
                     conn.execute(
                         "ALTER TABLE fingerprints ADD COLUMN z_m REAL NOT NULL DEFAULT 0"
                     )
                 cols = {
-                    row[1]
-                    for row in conn.execute("PRAGMA table_info(fingerprints)")
+                    row[1] for row in conn.execute("PRAGMA table_info(fingerprints)")
                 }
                 if "positioned" not in cols:
                     conn.execute(
@@ -182,8 +180,7 @@ class FingerprintStore:
                         "ALTER TABLE fingerprints ADD COLUMN distances_json TEXT"
                     )
                 cols = {
-                    row[1]
-                    for row in conn.execute("PRAGMA table_info(fingerprints)")
+                    row[1] for row in conn.execute("PRAGMA table_info(fingerprints)")
                 }
                 if "rssi_stats_json" not in cols:
                     conn.execute(
@@ -290,9 +287,7 @@ class FingerprintStore:
     def delete(self, label: str) -> bool:
         with self._lock:
             with self._connect() as conn:
-                cur = conn.execute(
-                    "DELETE FROM fingerprints WHERE label = ?", (label,)
-                )
+                cur = conn.execute("DELETE FROM fingerprints WHERE label = ?", (label,))
                 conn.commit()
                 deleted = cur.rowcount > 0
             if deleted:

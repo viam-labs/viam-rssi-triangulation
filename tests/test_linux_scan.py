@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from rssi_triangulation.linux_scan import parse_iw_scan, parse_wpa_cli_scan_results
 
-
 IW_SAMPLE = """
 BSS aa:bb:cc:dd:ee:01(on wlan0)
 \tfreq: 5180

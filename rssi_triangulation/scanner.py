@@ -58,8 +58,7 @@ def decayed_aggregate(
         if len(group) > 1:
             var = (
                 sum(
-                    w * (s.reading.rssi_dbm - mean) ** 2
-                    for s, w in zip(group, weights)
+                    w * (s.reading.rssi_dbm - mean) ** 2 for s, w in zip(group, weights)
                 )
                 / wsum
             )

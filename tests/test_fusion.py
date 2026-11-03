@@ -53,7 +53,9 @@ def test_moving_tracks_measurements_faster() -> None:
 def test_directional_prediction_shifts_estimate() -> None:
     f = PositionFilter(process_noise_m=0.1)
     f.update(0.0, 0.0)
-    f.predict(MotionDelta(dx_m=3.0, dy_m=4.0, has_direction=True, speed_mps=5.0), dt_s=1.0)
+    f.predict(
+        MotionDelta(dx_m=3.0, dy_m=4.0, has_direction=True, speed_mps=5.0), dt_s=1.0
+    )
     # Before any correction the prediction has moved the mean by the delta.
     assert f.position == (3.0, 4.0)
 
